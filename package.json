@@ -1,0 +1,31 @@
+{
+  "name": "imgsqueeze-cli",
+  "version": "1.0.0",
+  "description": "IMG Squeeze CLI - Image optimization CLI tool",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "imsq": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "naorbieta",
+  "license": "MIT",
+  "dependencies": {
+    "@inquirer/prompts": "^8.5.2",
+    "chalk": "^5.6.2",
+    "commander": "^15.0.0",
+    "fast-glob": "^3.3.3",
+    "ora": "^9.4.1",
+    "sharp": "^0.35.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

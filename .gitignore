@@ -1,0 +1,26 @@
+# Dependency directories
+node_modules/
+
+# Build outputs
+dist/
+
+# Local/Temporary optimization outputs
+optimized/
+optimized_*/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+npm-debug.log*
+
+# IDEs and editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
