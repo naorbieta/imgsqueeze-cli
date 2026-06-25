@@ -125,6 +125,44 @@ function displayOutputDir(cwd: string, outputDir: string, directoryOption?: stri
   return path.relative(cwd, outputDir) || outputDir;
 }
 
+function formatSizeForSummary(size?: string): string | undefined {
+  if (!size) {
+    return undefined;
+  }
+  const normalized = size.trim().toLowerCase();
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(b|kb|mb|gb)?$/);
+  if (!match) {
+    return size;
+  }
+  const value = match[1];
+  const unit = (match[2] || 'b').toUpperCase();
+  return `${value}${unit}`;
+}
+
+function formatLengthForSummary(length?: string): string | undefined {
+  if (!length) {
+    return undefined;
+  }
+  const parts = length
+    .trim()
+    .toLowerCase()
+    .split(/[\s,;]+/)
+    .filter(Boolean)
+    .map((part) => {
+      if (part.startsWith('w:')) {
+        const val = part.slice(2);
+        return val.endsWith('%') ? `width:${val}` : `width:${val}px`;
+      }
+      if (part.startsWith('h:')) {
+        const val = part.slice(2);
+        return val.endsWith('%') ? `height:${val}` : `height:${val}px`;
+      }
+      return part;
+    });
+
+  return parts.join(', ');
+}
+
 function visualWidth(text: string): number {
   let width = 0;
   for (const ch of text) {
@@ -290,7 +328,47 @@ function extractEffectiveOptions(): StoredOptions {
   const cliProvided = normalizeOptions(program.opts());
   const hasUserArgs = process.argv.slice(2).length > 0;
   const stored = readStoredOptions();
-  return hasUserArgs ? mergeOptions(stored, cliProvided) : stored;
+
+  if (!hasUserArgs) {
+    return stored;
+  }
+
+  const onlyPickAndConfirm =
+    !!cliProvided.pick &&
+    !!cliProvided.confirm &&
+    !cliProvided.format &&
+    !cliProvided.size &&
+    !cliProvided.length &&
+    !cliProvided.recursive &&
+    !cliProvided.keep &&
+    !cliProvided.name &&
+    !cliProvided.directory;
+
+  const onlyPick =
+    !!cliProvided.pick &&
+    !cliProvided.confirm &&
+    !cliProvided.format &&
+    !cliProvided.size &&
+    !cliProvided.length &&
+    !cliProvided.recursive &&
+    !cliProvided.keep &&
+    !cliProvided.name &&
+    !cliProvided.directory;
+
+  const onlyConfirm =
+    !!cliProvided.confirm &&
+    !cliProvided.pick &&
+    !cliProvided.format &&
+    !cliProvided.size &&
+    !cliProvided.length &&
+    !cliProvided.recursive &&
+    !cliProvided.keep &&
+    !cliProvided.name &&
+    !cliProvided.directory;
+
+  return (onlyPickAndConfirm || onlyPick || onlyConfirm)
+    ? mergeOptions(stored, cliProvided)
+    : cliProvided;
 }
 
 async function loadProcessingDeps(): Promise<{
@@ -445,12 +523,12 @@ async function main(): Promise<void> {
   }
 
   const resizeValue = options.length
-    ? formatResizeSpec(options.length, stretchMode)
+    ? formatLengthForSummary(options.length) + (stretchMode ? ' (ストレッチ)' : '')
     : undefined;
 
   printOptionSummary([
     { label: 'フォーマット', flag: '-f', value: format },
-    { label: '最大サイズ', flag: '-s', value: targetSize !== undefined ? formatSize(targetSize) : undefined },
+    { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
     { label: 'リサイズ', flag: '-l', value: resizeValue },
     { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
     { label: 'リネーム', flag: '-n', value: options.name },
