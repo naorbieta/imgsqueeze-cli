@@ -82,6 +82,7 @@ export async function optimizeImage(
     fileIndex?: number;
     recursive: boolean;
     cwd: string;
+    copyOnly?: boolean;
   }
 ): Promise<OptimizeResult> {
   const absoluteInputPath = path.resolve(options.cwd, inputPath);
@@ -138,6 +139,23 @@ export async function optimizeImage(
   try {
     // アニメーションGIF/WebPの場合はフレームを維持して読み込む
     const isAnimated = originalExt === '.gif' || originalExt === '.webp';
+
+    if (options.copyOnly) {
+      const outputDirPath = path.dirname(absoluteOutputPath);
+      if (!fs.existsSync(outputDirPath)) {
+        fs.mkdirSync(outputDirPath, { recursive: true });
+      }
+      fs.copyFileSync(absoluteInputPath, absoluteOutputPath);
+
+      return {
+        success: true,
+        inputPath,
+        outputPath: path.relative(options.cwd, absoluteOutputPath),
+        originalSize,
+        outputSize: originalSize,
+      };
+    }
+
     let sharpInstance = sharp(absoluteInputPath, isAnimated ? { animated: true } : {});
 
     // メタデータ取得 (パーセント指定のリサイズに必要)
