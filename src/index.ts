@@ -130,7 +130,7 @@ function formatSizeForSummary(size?: string): string | undefined {
     return undefined;
   }
   const normalized = size.trim().toLowerCase();
-  const match = normalized.match(/^(\d+(?:\.\d+)?)(b|kb|mb|gb)?$/);
+  const match = normalized.match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/);
   if (!match) {
     return size;
   }
@@ -203,6 +203,15 @@ function printOptionSummary(rows: Array<{ label: string; flag: string; value?: s
     }
   }
   console.log(chalk.gray('-'.repeat(44)));
+}
+
+function printSelectedFilesSummary(fileNames: string[]): void {
+  console.log(chalk.bold('対象ファイル:'));
+  console.log(chalk.cyan(`  ${fileNames.length}件`));
+  for (const fileName of fileNames) {
+    console.log(`  - ${fileName}`);
+  }
+  console.log('');
 }
 
 function readStoredOptions(): StoredOptions {
@@ -410,14 +419,25 @@ function isPromptAbortError(err: unknown): boolean {
     || message.includes('SIGINT');
 }
 
-async function promptForConfirmation(options: EffectiveOptions): Promise<EffectiveOptions | null> {
+async function promptForConfirmation(
+  options: EffectiveOptions,
+  selectedFiles?: string[]
+): Promise<EffectiveOptions | null> {
   let current = options;
 
   while (true) {
+    if (selectedFiles && selectedFiles.length > 0) {
+      printSelectedFilesSummary(selectedFiles);
+    }
+
+    const resizeValue = current.length
+      ? formatLengthForSummary(current.length)
+      : undefined;
+
     printOptionSummary([
       { label: 'フォーマット', flag: '-f', value: current.format },
-      { label: '最大サイズ', flag: '-s', value: current.size },
-      { label: 'リサイズ', flag: '-l', value: current.length },
+      { label: '最大サイズ', flag: '-s', value: current.size ? formatSizeForSummary(current.size) : undefined },
+      { label: 'リサイズ', flag: '-l', value: resizeValue },
       { label: 'メタデータ保持', flag: '-k', value: current.keep ? '有効' : undefined },
       { label: 'リネーム', flag: '-n', value: current.name },
       { label: '対話モード', flag: '-p', value: current.pick ? '有効' : undefined },
@@ -429,7 +449,7 @@ async function promptForConfirmation(options: EffectiveOptions): Promise<Effecti
     let answer: string;
     try {
       answer = (await input({
-        message: '処理を開始しますか？ ( y / n / <option> )',
+        message: '処理を開始しますか？ [ y / n / <option> ]',
         default: '',
       })).trim();
     } catch (err) {
@@ -461,11 +481,49 @@ async function promptForConfirmation(options: EffectiveOptions): Promise<Effecti
   }
 }
 
+async function promptToProceed(
+  options: EffectiveOptions,
+  selectedFiles: string[]
+): Promise<boolean> {
+  const resizeValue = options.length
+    ? formatLengthForSummary(options.length)
+    : undefined;
+
+  printSelectedFilesSummary(selectedFiles);
+  printOptionSummary([
+    { label: 'フォーマット', flag: '-f', value: options.format },
+    { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
+    { label: 'リサイズ', flag: '-l', value: resizeValue },
+    { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
+    { label: 'リネーム', flag: '-n', value: options.name },
+    { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
+    { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
+    { label: '出力先指定', flag: '-d', value: options.directory },
+    { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
+  ]);
+
+  let answer: string;
+  try {
+    answer = (await input({
+      message: '処理を開始しますか？ [ y / n ]',
+      default: '',
+    })).trim();
+  } catch (err) {
+    if (isPromptAbortError(err)) {
+      return false;
+    }
+    throw err;
+  }
+
+  return !answer || /^y(es)?$/i.test(answer);
+}
+
 async function main(): Promise<void> {
   let options = extractEffectiveOptions();
   const cwd = process.cwd();
+  const hadConfirmPrompt = options.confirm;
 
-  if (options.confirm) {
+  if (options.confirm && !options.pick) {
     const confirmed = await promptForConfirmation(options);
     if (confirmed === null) {
       console.log(chalk.yellow('処理をキャンセルしました。'));
@@ -522,22 +580,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  const resizeValue = options.length
-    ? formatLengthForSummary(options.length) + (stretchMode ? ' (ストレッチ)' : '')
-    : undefined;
-
-  printOptionSummary([
-    { label: 'フォーマット', flag: '-f', value: format },
-    { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
-    { label: 'リサイズ', flag: '-l', value: resizeValue },
-    { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
-    { label: 'リネーム', flag: '-n', value: options.name },
-    { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
-    { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
-    { label: '出力先指定', flag: '-d', value: options.directory },
-    { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
-  ]);
-
   if (options.pick) {
     console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
     try {
@@ -555,6 +597,32 @@ async function main(): Promise<void> {
       console.log(chalk.yellow('\n選択がキャンセルされました。'));
       return;
     }
+  }
+
+  if (options.confirm && options.pick) {
+    const proceed = await promptToProceed(options, imageFiles);
+    if (!proceed) {
+      console.log(chalk.yellow('処理をキャンセルしました。'));
+      return;
+    }
+  }
+
+  const resizeValue = options.length
+    ? formatLengthForSummary(options.length) + (stretchMode ? ' (ストレッチ)' : '')
+    : undefined;
+
+  if (!hadConfirmPrompt) {
+    printOptionSummary([
+      { label: 'フォーマット', flag: '-f', value: format },
+      { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
+      { label: 'リサイズ', flag: '-l', value: resizeValue },
+      { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
+      { label: 'リネーム', flag: '-n', value: options.name },
+      { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
+      { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
+      { label: '出力先指定', flag: '-d', value: options.directory },
+      { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
+    ]);
   }
 
   const outputDirLabel = displayOutputDir(cwd, outputDir, options.directory);
