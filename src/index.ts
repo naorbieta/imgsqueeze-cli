@@ -18,6 +18,8 @@ type StoredOptions = {
   pick?: boolean;
   directory?: string;
   confirm?: boolean;
+  hard?: boolean;
+  trash?: boolean;
 };
 
 type EffectiveOptions = StoredOptions;
@@ -28,16 +30,18 @@ const stateFilePath = path.join(os.homedir(), '.imsq.json');
 program
   .name('imsq')
   .description('IMG Squeeze CLI - 画像最適化CLIツール (カレントディレクトリ内の画像を最適化して出力します)')
-  .version('IMG Squeeze CLI v0.1.0', '-v, --version')
+  .version('IMG Squeeze CLI v0.1.1', '-v, --version')
   .option('-f, --format <type>', '出力形式指定 (jpg, png, gif, webp)')
   .option('-s, --size <size>', '最大ファイルサイズ指定 (例: 50kb, 100kb, 1mb)')
   .option('-l, --length <dimensions>', 'リサイズ指定 (例: w:600, h:400, w:600,h:400, w:50%, h:50%)')
   .option('-r, --recursive', 'サブディレクトリ内の画像も処理する')
   .option('-k, --keep', 'メタデータを保持する (Exif, ICC profileなど)')
-  .option('-n, --name <pattern>', 'リネームパターン (* = 1桁連番, ** = 2桁, *** = 3桁)')
+  .option('-n, --name <pattern>', 'リネームパターン (? = 元ファイル名, * = 1桁連番, ** = 2桁, *** = 3桁)')
   .option('-p, --pick', '対話モード: 処理対象の画像を選択する')
   .option('-d, --directory <dir>', '出力先ディレクトリ指定 (例: ./output, . で現在のディレクトリ)')
   .option('-c, --confirm', '処理を開始する前に確認を挟む')
+  .option('--hard', '出力成功後に元ファイルをゴミ箱へ送らず削除する')
+  .option('--trash', '出力成功後に元ファイルをゴミ箱へ送る')
   .parse(process.argv);
 
 function parseLengthOption(length: string): {
@@ -123,6 +127,13 @@ function displayOutputDir(cwd: string, outputDir: string, directoryOption?: stri
     return '現在のディレクトリ (.)';
   }
   return path.relative(cwd, outputDir) || outputDir;
+}
+
+function formatDirectoryForSummary(directoryOption?: string): string | undefined {
+  if (directoryOption === '.') {
+    return '現在のディレクトリ';
+  }
+  return directoryOption;
 }
 
 function formatSizeForSummary(size?: string): string | undefined {
@@ -218,7 +229,13 @@ function readStoredOptions(): StoredOptions {
   try {
     const raw = fs.readFileSync(stateFilePath, 'utf8');
     const parsed = JSON.parse(raw) as { options?: StoredOptions };
-    return parsed.options ?? {};
+    return {
+      ...(parsed.options ?? {}),
+      pick: false,
+      confirm: false,
+      hard: false,
+      trash: false,
+    };
   } catch {
     return {};
   }
@@ -226,7 +243,16 @@ function readStoredOptions(): StoredOptions {
 
 function writeStoredOptions(options: StoredOptions): void {
   try {
-    fs.writeFileSync(stateFilePath, JSON.stringify({ options }, null, 2));
+    const persisted: StoredOptions = {
+      format: options.format,
+      size: options.size,
+      length: options.length,
+      recursive: options.recursive,
+      keep: options.keep,
+      name: options.name,
+      directory: options.directory,
+    };
+    fs.writeFileSync(stateFilePath, JSON.stringify({ options: persisted }, null, 2));
   } catch {
     // 状態保存は失敗しても処理を継続する
   }
@@ -254,6 +280,8 @@ function normalizeOptions(raw: Record<string, unknown>): StoredOptions {
     pick: !!raw.pick,
     directory: normalizeOptionValue(typeof raw.directory === 'string' ? raw.directory : undefined),
     confirm: !!raw.confirm,
+    hard: !!raw.hard,
+    trash: !!raw.trash,
   };
 }
 
@@ -268,6 +296,27 @@ function mergeOptions(base: StoredOptions, override: StoredOptions): StoredOptio
     pick: override.pick ?? base.pick ?? false,
     directory: override.directory !== undefined ? override.directory : base.directory,
     confirm: override.confirm ?? base.confirm ?? false,
+    hard: override.hard ?? base.hard ?? false,
+    trash: override.trash ?? base.trash ?? false,
+  };
+}
+
+function applyPromptOverrides(base: StoredOptions, override: StoredOptions): StoredOptions {
+  const next = { ...base };
+
+  for (const key of Object.keys(override) as Array<keyof StoredOptions>) {
+    (next as Record<keyof StoredOptions, StoredOptions[keyof StoredOptions]>)[key] = override[key];
+  }
+
+  return next;
+}
+
+function resetPromptOptions(current: EffectiveOptions): EffectiveOptions {
+  return {
+    pick: current.pick,
+    confirm: current.confirm,
+    hard: current.hard,
+    trash: current.trash,
   };
 }
 
@@ -313,6 +362,14 @@ function parseOptionTokens(tokens: string[]): StoredOptions {
       case '--confirm':
         parsed.confirm = true;
         break;
+      case '--hard':
+        parsed.hard = true;
+        parsed.trash = false;
+        break;
+      case '--trash':
+        parsed.trash = true;
+        parsed.hard = false;
+        break;
       default:
         throw new Error(`無効な追加オプションです: ${token}`);
     }
@@ -351,7 +408,9 @@ function extractEffectiveOptions(): StoredOptions {
     !cliProvided.recursive &&
     !cliProvided.keep &&
     !cliProvided.name &&
-    !cliProvided.directory;
+    !cliProvided.directory &&
+    !cliProvided.hard &&
+    !cliProvided.trash;
 
   const onlyPick =
     !!cliProvided.pick &&
@@ -362,7 +421,9 @@ function extractEffectiveOptions(): StoredOptions {
     !cliProvided.recursive &&
     !cliProvided.keep &&
     !cliProvided.name &&
-    !cliProvided.directory;
+    !cliProvided.directory &&
+    !cliProvided.hard &&
+    !cliProvided.trash;
 
   const onlyConfirm =
     !!cliProvided.confirm &&
@@ -373,7 +434,9 @@ function extractEffectiveOptions(): StoredOptions {
     !cliProvided.recursive &&
     !cliProvided.keep &&
     !cliProvided.name &&
-    !cliProvided.directory;
+    !cliProvided.directory &&
+    !cliProvided.hard &&
+    !cliProvided.trash;
 
   return (onlyPickAndConfirm || onlyPick || onlyConfirm)
     ? mergeOptions(stored, cliProvided)
@@ -442,7 +505,7 @@ async function promptForConfirmation(
       { label: 'リネーム', flag: '-n', value: current.name },
       { label: '対話モード', flag: '-p', value: current.pick ? '有効' : undefined },
       { label: '再帰処理', flag: '-r', value: current.recursive ? '有効' : undefined },
-      { label: '出力先指定', flag: '-d', value: current.directory },
+      { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(current.directory) },
       { label: '確認モード', flag: '-c', value: current.confirm ? '有効' : undefined },
     ]);
 
@@ -467,6 +530,11 @@ async function promptForConfirmation(
       return null;
     }
 
+    if (isInitToken(answer)) {
+      current = resetPromptOptions(current);
+      continue;
+    }
+
     const tokens = tokenizeArgString(answer);
     if (tokens.length === 0) {
       continue;
@@ -474,48 +542,11 @@ async function promptForConfirmation(
 
     try {
       const overrides = parseOptionTokens(tokens);
-      current = mergeOptions(current, overrides);
+      current = applyPromptOverrides(current, overrides);
     } catch (err: any) {
       console.error(chalk.red(`エラー: ${err.message}`));
     }
   }
-}
-
-async function promptToProceed(
-  options: EffectiveOptions,
-  selectedFiles: string[]
-): Promise<boolean> {
-  const resizeValue = options.length
-    ? formatLengthForSummary(options.length)
-    : undefined;
-
-  printSelectedFilesSummary(selectedFiles);
-  printOptionSummary([
-    { label: 'フォーマット', flag: '-f', value: options.format },
-    { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
-    { label: 'リサイズ', flag: '-l', value: resizeValue },
-    { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
-    { label: 'リネーム', flag: '-n', value: options.name },
-    { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
-    { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
-    { label: '出力先指定', flag: '-d', value: options.directory },
-    { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
-  ]);
-
-  let answer: string;
-  try {
-    answer = (await input({
-      message: '処理を開始しますか？ [ y / n ]',
-      default: '',
-    })).trim();
-  } catch (err) {
-    if (isPromptAbortError(err)) {
-      return false;
-    }
-    throw err;
-  }
-
-  return !answer || /^y(es)?$/i.test(answer);
 }
 
 async function main(): Promise<void> {
@@ -523,8 +554,54 @@ async function main(): Promise<void> {
   const cwd = process.cwd();
   const hadConfirmPrompt = options.confirm;
 
+  if (options.hard && options.trash) {
+    console.error(chalk.red('エラー: --hard と --trash は同時に指定できません。'));
+    process.exit(1);
+  }
+
   if (options.confirm && !options.pick) {
     const confirmed = await promptForConfirmation(options);
+    if (confirmed === null) {
+      console.log(chalk.yellow('処理をキャンセルしました。'));
+      return;
+    }
+    options = confirmed;
+  }
+
+  let outputDir = resolveOutputDir(cwd, options.directory);
+  const ignoreDirs = collectOptimizedDirs(cwd);
+  const outputDirName = path.basename(outputDir);
+  if (path.dirname(outputDir) === cwd && !ignoreDirs.includes(outputDirName)) {
+    ignoreDirs.push(outputDirName);
+  }
+
+  let imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
+  if (imageFiles.length === 0) {
+    console.log(chalk.yellow('処理対象の画像が見つかりませんでした。'));
+    return;
+  }
+
+  if (options.pick) {
+    console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
+    try {
+      const selected = await checkbox({
+        message: '処理する画像を選択してください:',
+        choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
+        pageSize: 20,
+      });
+      if (selected.length === 0) {
+        console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
+        return;
+      }
+      imageFiles = selected;
+    } catch {
+      console.log(chalk.yellow('\n選択がキャンセルされました。'));
+      return;
+    }
+  }
+
+  if (options.confirm && options.pick) {
+    const confirmed = await promptForConfirmation(options, imageFiles);
     if (confirmed === null) {
       console.log(chalk.yellow('処理をキャンセルしました。'));
       return;
@@ -567,45 +644,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const outputDir = resolveOutputDir(cwd, options.directory);
-  const ignoreDirs = collectOptimizedDirs(cwd);
-  const outputDirName = path.basename(outputDir);
-  if (path.dirname(outputDir) === cwd && !ignoreDirs.includes(outputDirName)) {
-    ignoreDirs.push(outputDirName);
-  }
-
-  let imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
-  if (imageFiles.length === 0) {
-    console.log(chalk.yellow('処理対象の画像が見つかりませんでした。'));
-    return;
-  }
-
-  if (options.pick) {
-    console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
-    try {
-      const selected = await checkbox({
-        message: '処理する画像を選択してください:',
-        choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
-        pageSize: 20,
-      });
-      if (selected.length === 0) {
-        console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
-        return;
-      }
-      imageFiles = selected;
-    } catch {
-      console.log(chalk.yellow('\n選択がキャンセルされました。'));
-      return;
-    }
-  }
-
-  if (options.confirm && options.pick) {
-    const proceed = await promptToProceed(options, imageFiles);
-    if (!proceed) {
-      console.log(chalk.yellow('処理をキャンセルしました。'));
-      return;
-    }
-  }
+  outputDir = resolveOutputDir(cwd, options.directory);
 
   const resizeValue = options.length
     ? formatLengthForSummary(options.length) + (stretchMode ? ' (ストレッチ)' : '')
@@ -620,7 +659,7 @@ async function main(): Promise<void> {
       { label: 'リネーム', flag: '-n', value: options.name },
       { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
       { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
-      { label: '出力先指定', flag: '-d', value: options.directory },
+      { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(options.directory) },
       { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
     ]);
   }
@@ -652,6 +691,8 @@ async function main(): Promise<void> {
       recursive: !!options.recursive,
       cwd,
       copyOnly,
+      hardDelete: !!options.hard,
+      trashOriginal: !!options.trash,
     });
 
     if (result.success) {

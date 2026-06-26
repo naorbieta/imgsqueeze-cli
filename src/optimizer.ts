@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
+import trash from 'trash';
 import type { Sharp, ResizeOptions } from 'sharp';
 
 export interface OptimizeResult {
@@ -45,14 +46,15 @@ async function compress(
 }
 
 /**
- * -n / --name パターンから連番付きのファイル名を生成する
+ * -n / --name パターンからファイル名を生成する
+ * ? → 元ファイル名 (拡張子除く)
  * * → 1桁 (1, 2, ..., 9, 10, ...)
  * ** → 2桁 (01, 02, ...)
  * *** → 3桁 (001, 002, ...)
  */
-function applyNamePattern(pattern: string, index: number, ext: string): string {
+function applyNamePattern(pattern: string, originalBaseName: string, index: number, ext: string): string {
   // *** から順に長いものから置換 (短いパターンに誤マッチしないよう)
-  let result = pattern;
+  let result = pattern.replaceAll('?', originalBaseName);
   if (result.includes('***')) {
     result = result.replace('***', String(index).padStart(3, '0'));
   } else if (result.includes('**')) {
@@ -61,6 +63,43 @@ function applyNamePattern(pattern: string, index: number, ext: string): string {
     result = result.replace('*', String(index));
   }
   return result + ext;
+}
+
+function createTempOutputPath(targetPath: string): string {
+  const tempName = `.imsq-tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return path.join(path.dirname(targetPath), tempName);
+}
+
+async function movePathToTrash(filePath: string): Promise<void> {
+  await trash([filePath]);
+}
+
+function deletePath(filePath: string): void {
+  fs.unlinkSync(filePath);
+}
+
+async function replaceSamePathFromTemp(
+  inputPath: string,
+  outputPath: string,
+  tempPath: string,
+  hardDelete: boolean
+): Promise<void> {
+  if (hardDelete) {
+    deletePath(inputPath);
+  } else {
+    await movePathToTrash(inputPath);
+  }
+
+  try {
+    fs.copyFileSync(tempPath, outputPath);
+  } catch (err) {
+    try {
+      fs.copyFileSync(tempPath, inputPath);
+    } catch {
+      // 復旧失敗時は元のエラーを優先する
+    }
+    throw err;
+  }
 }
 
 /**
@@ -83,6 +122,8 @@ export async function optimizeImage(
     recursive: boolean;
     cwd: string;
     copyOnly?: boolean;
+    hardDelete?: boolean;
+    trashOriginal?: boolean;
   }
 ): Promise<OptimizeResult> {
   const absoluteInputPath = path.resolve(options.cwd, inputPath);
@@ -113,7 +154,13 @@ export async function optimizeImage(
 
   if (options.namePattern) {
     // --name パターン指定時: ファイル名をパターンで置き換える
-    const newFileName = applyNamePattern(options.namePattern, options.fileIndex ?? 1, targetExt);
+    const originalBaseName = path.basename(inputPath, originalExt);
+    const newFileName = applyNamePattern(
+      options.namePattern,
+      originalBaseName,
+      options.fileIndex ?? 1,
+      targetExt
+    );
     if (options.recursive) {
       const relativeInputPath = path.relative(options.cwd, absoluteInputPath);
       const dir = path.dirname(relativeInputPath);
@@ -139,13 +186,39 @@ export async function optimizeImage(
   try {
     // アニメーションGIF/WebPの場合はフレームを維持して読み込む
     const isAnimated = originalExt === '.gif' || originalExt === '.webp';
+    const outputDirPath = path.dirname(absoluteOutputPath);
+    const samePath = absoluteInputPath === absoluteOutputPath;
+    let warning: string | undefined;
+
+    if (!fs.existsSync(outputDirPath)) {
+      fs.mkdirSync(outputDirPath, { recursive: true });
+    }
 
     if (options.copyOnly) {
-      const outputDirPath = path.dirname(absoluteOutputPath);
-      if (!fs.existsSync(outputDirPath)) {
-        fs.mkdirSync(outputDirPath, { recursive: true });
+      const tempOutputPath = createTempOutputPath(absoluteOutputPath);
+      try {
+        fs.copyFileSync(absoluteInputPath, tempOutputPath);
+
+        if (samePath) {
+          await replaceSamePathFromTemp(
+            absoluteInputPath,
+            absoluteOutputPath,
+            tempOutputPath,
+            !!options.hardDelete
+          );
+        } else {
+          fs.copyFileSync(tempOutputPath, absoluteOutputPath);
+          if (options.hardDelete) {
+            deletePath(absoluteInputPath);
+          } else if (options.trashOriginal) {
+            await movePathToTrash(absoluteInputPath);
+          }
+        }
+      } finally {
+        if (fs.existsSync(tempOutputPath)) {
+          fs.unlinkSync(tempOutputPath);
+        }
       }
-      fs.copyFileSync(absoluteInputPath, absoluteOutputPath);
 
       return {
         success: true,
@@ -153,6 +226,7 @@ export async function optimizeImage(
         outputPath: path.relative(options.cwd, absoluteOutputPath),
         originalSize,
         outputSize: originalSize,
+        warning,
       };
     }
 
@@ -209,7 +283,6 @@ export async function optimizeImage(
     }
 
     let finalBuffer: Buffer;
-    let warning: string | undefined;
 
     if (options.size) {
       const targetSize = options.size;
@@ -239,21 +312,37 @@ export async function optimizeImage(
       finalBuffer = await compress(sharpInstance, formatName, 80);
     }
 
-    // 出力フォルダの作成
-    const outputDirPath = path.dirname(absoluteOutputPath);
-    if (!fs.existsSync(outputDirPath)) {
-      fs.mkdirSync(outputDirPath, { recursive: true });
-    }
+    const tempOutputPath = createTempOutputPath(absoluteOutputPath);
+    try {
+      fs.writeFileSync(tempOutputPath, finalBuffer);
 
-    // 最適化された画像を保存
-    fs.writeFileSync(absoluteOutputPath, finalBuffer);
+      if (samePath) {
+        await replaceSamePathFromTemp(
+          absoluteInputPath,
+          absoluteOutputPath,
+          tempOutputPath,
+          !!options.hardDelete
+        );
+      } else {
+        fs.copyFileSync(tempOutputPath, absoluteOutputPath);
+        if (options.hardDelete) {
+          deletePath(absoluteInputPath);
+        } else if (options.trashOriginal) {
+          await movePathToTrash(absoluteInputPath);
+        }
+      }
+    } finally {
+      if (fs.existsSync(tempOutputPath)) {
+        fs.unlinkSync(tempOutputPath);
+      }
+    }
 
     return {
       success: true,
       inputPath,
       outputPath: path.relative(options.cwd, absoluteOutputPath),
       originalSize,
-      outputSize: finalBuffer.length,
+      outputSize: fs.statSync(absoluteOutputPath).size,
       warning,
     };
   } catch (err: any) {
