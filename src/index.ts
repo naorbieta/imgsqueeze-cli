@@ -527,8 +527,7 @@ async function promptForConfirmation(
       { label: '再帰処理', flag: '-r', value: current.recursive ? '有効' : undefined },
       { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(current.directory) },
       { label: '確認モード', flag: '-c', value: current.confirm ? '有効' : undefined },
-      { label: '監視モード', flag: '-w', value: current.watch ? '有効' : undefined },
-      { label: '初期処理スキップ', flag: '--no-initial', value: current.initial === false ? '有効' : undefined },
+      { label: '監視モード', flag: '-w', value: current.watch ? (current.initial === false ? '有効/初期処理をスキップ' : '有効') : undefined },
     ]);
 
     let answer: string;
