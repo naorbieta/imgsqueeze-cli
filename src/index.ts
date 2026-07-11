@@ -20,6 +20,8 @@ type StoredOptions = {
   confirm?: boolean;
   hard?: boolean;
   trash?: boolean;
+  watch?: boolean;
+  initial?: boolean;
 };
 
 type EffectiveOptions = StoredOptions;
@@ -30,7 +32,7 @@ const stateFilePath = path.join(os.homedir(), '.imsq.json');
 program
   .name('imsq')
   .description('IMG Squeeze CLI - 画像最適化CLIツール (カレントディレクトリ内の画像を最適化して出力します)')
-  .version('IMG Squeeze CLI v0.1.1', '-v, --version')
+  .version('IMG Squeeze CLI v0.2.0', '-v, --version')
   .option('-f, --format <type>', '出力形式指定 (jpg, png, gif, webp)')
   .option('-s, --size <size>', '最大ファイルサイズ指定 (例: 50kb, 100kb, 1mb)')
   .option('-l, --length <dimensions>', 'リサイズ指定 (例: w:600, h:400, w:600,h:400, w:50%, h:50%)')
@@ -42,6 +44,8 @@ program
   .option('-c, --confirm', '処理を開始する前に確認を挟む')
   .option('--hard', '出力成功後に元ファイルをゴミ箱へ送らず削除する')
   .option('--trash', '出力成功後に元ファイルをゴミ箱へ送る')
+  .option('-w, --watch', '監視モード: ディレクトリ内を監視して、新しい画像が増えたら自動で処理する')
+  .option('--no-initial', '監視モード時、起動時に存在するファイルの処理をスキップする')
   .parse(process.argv);
 
 function parseLengthOption(length: string): {
@@ -235,6 +239,8 @@ function readStoredOptions(): StoredOptions {
       confirm: false,
       hard: false,
       trash: false,
+      watch: false,
+      initial: true,
     };
   } catch {
     return {};
@@ -282,6 +288,8 @@ function normalizeOptions(raw: Record<string, unknown>): StoredOptions {
     confirm: !!raw.confirm,
     hard: !!raw.hard,
     trash: !!raw.trash,
+    watch: !!raw.watch,
+    initial: raw.initial !== false,
   };
 }
 
@@ -298,6 +306,8 @@ function mergeOptions(base: StoredOptions, override: StoredOptions): StoredOptio
     confirm: override.confirm ?? base.confirm ?? false,
     hard: override.hard ?? base.hard ?? false,
     trash: override.trash ?? base.trash ?? false,
+    watch: override.watch ?? base.watch ?? false,
+    initial: override.initial ?? base.initial ?? true,
   };
 }
 
@@ -370,6 +380,13 @@ function parseOptionTokens(tokens: string[]): StoredOptions {
         parsed.trash = true;
         parsed.hard = false;
         break;
+      case '-w':
+      case '--watch':
+        parsed.watch = true;
+        break;
+      case '--no-initial':
+        parsed.initial = false;
+        break;
       default:
         throw new Error(`無効な追加オプションです: ${token}`);
     }
@@ -410,7 +427,8 @@ function extractEffectiveOptions(): StoredOptions {
     !cliProvided.name &&
     !cliProvided.directory &&
     !cliProvided.hard &&
-    !cliProvided.trash;
+    !cliProvided.trash &&
+    !cliProvided.watch;
 
   const onlyPick =
     !!cliProvided.pick &&
@@ -423,7 +441,8 @@ function extractEffectiveOptions(): StoredOptions {
     !cliProvided.name &&
     !cliProvided.directory &&
     !cliProvided.hard &&
-    !cliProvided.trash;
+    !cliProvided.trash &&
+    !cliProvided.watch;
 
   const onlyConfirm =
     !!cliProvided.confirm &&
@@ -436,7 +455,8 @@ function extractEffectiveOptions(): StoredOptions {
     !cliProvided.name &&
     !cliProvided.directory &&
     !cliProvided.hard &&
-    !cliProvided.trash;
+    !cliProvided.trash &&
+    !cliProvided.watch;
 
   return (onlyPickAndConfirm || onlyPick || onlyConfirm)
     ? mergeOptions(stored, cliProvided)
@@ -507,6 +527,8 @@ async function promptForConfirmation(
       { label: '再帰処理', flag: '-r', value: current.recursive ? '有効' : undefined },
       { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(current.directory) },
       { label: '確認モード', flag: '-c', value: current.confirm ? '有効' : undefined },
+      { label: '監視モード', flag: '-w', value: current.watch ? '有効' : undefined },
+      { label: '初期処理スキップ', flag: '--no-initial', value: current.initial === false ? '有効' : undefined },
     ]);
 
     let answer: string;
@@ -559,54 +581,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (options.confirm && !options.pick) {
-    const confirmed = await promptForConfirmation(options);
-    if (confirmed === null) {
-      console.log(chalk.yellow('処理をキャンセルしました。'));
-      return;
-    }
-    options = confirmed;
-  }
-
-  let outputDir = resolveOutputDir(cwd, options.directory);
-  const ignoreDirs = collectOptimizedDirs(cwd);
-  const outputDirName = path.basename(outputDir);
-  if (path.dirname(outputDir) === cwd && !ignoreDirs.includes(outputDirName)) {
-    ignoreDirs.push(outputDirName);
-  }
-
-  let imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
-  if (imageFiles.length === 0) {
-    console.log(chalk.yellow('処理対象の画像が見つかりませんでした。'));
-    return;
-  }
-
-  if (options.pick) {
-    console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
-    try {
-      const selected = await checkbox({
-        message: '処理する画像を選択してください:',
-        choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
-        pageSize: 20,
-      });
-      if (selected.length === 0) {
-        console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
-        return;
-      }
-      imageFiles = selected;
-    } catch {
-      console.log(chalk.yellow('\n選択がキャンセルされました。'));
-      return;
-    }
-  }
-
-  if (options.confirm && options.pick) {
-    const confirmed = await promptForConfirmation(options, imageFiles);
-    if (confirmed === null) {
-      console.log(chalk.yellow('処理をキャンセルしました。'));
-      return;
-    }
-    options = confirmed;
+  if (options.watch && options.pick) {
+    console.error(chalk.red('エラー: 監視モード (-w, --watch) と対話モード (-p, --pick) は同時に指定できません。'));
+    process.exit(1);
   }
 
   const allowedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
@@ -644,7 +621,21 @@ async function main(): Promise<void> {
     }
   }
 
-  outputDir = resolveOutputDir(cwd, options.directory);
+  if (options.confirm && !options.pick) {
+    const confirmed = await promptForConfirmation(options);
+    if (confirmed === null) {
+      console.log(chalk.yellow('処理をキャンセルしました。'));
+      return;
+    }
+    options = confirmed;
+  }
+
+  let outputDir = resolveOutputDir(cwd, options.directory);
+  const ignoreDirs = collectOptimizedDirs(cwd);
+  const outputDirName = path.basename(outputDir);
+  if (path.dirname(outputDir) === cwd && !ignoreDirs.includes(outputDirName)) {
+    ignoreDirs.push(outputDirName);
+  }
 
   const resizeValue = options.length
     ? formatLengthForSummary(options.length) + (stretchMode ? ' (ストレッチ)' : '')
@@ -661,6 +652,8 @@ async function main(): Promise<void> {
       { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
       { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(options.directory) },
       { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
+      { label: '監視モード', flag: '-w', value: options.watch ? '有効' : undefined },
+      { label: '初期処理スキップ', flag: '--no-initial', value: options.initial === false ? '有効' : undefined },
     ]);
   }
 
@@ -673,6 +666,228 @@ async function main(): Promise<void> {
   let failureCount = 0;
   let totalOriginalSize = 0;
   let totalOutputSize = 0;
+
+  if (options.watch) {
+    let watchSuccessCount = 0;
+
+    // 1. 起動時処理 (options.initial !== false の場合のみ)
+    if (options.initial !== false) {
+      console.log(chalk.cyan('起動時処理を開始します...'));
+      const imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
+      if (imageFiles.length > 0) {
+        for (let i = 0; i < imageFiles.length; i++) {
+          const file = imageFiles[i];
+          const displayIndex = `[${i + 1}/${imageFiles.length}]`;
+          const spinner = ora(`${displayIndex} ${file} を処理中...`).start();
+
+          const result = await optimizeImage(file, outputDir, {
+            format,
+            size: targetSize,
+            widthSpec,
+            heightSpec,
+            stretchMode,
+            keepMetadata: !!options.keep,
+            namePattern: options.name,
+            fileIndex: i + 1,
+            recursive: !!options.recursive,
+            cwd,
+            copyOnly,
+            hardDelete: !!options.hard,
+            trashOriginal: !!options.trash,
+          });
+
+          if (result.success) {
+            successCount++;
+            watchSuccessCount++;
+            totalOriginalSize += result.originalSize;
+            totalOutputSize += result.outputSize || 0;
+
+            const reduction = result.originalSize - (result.outputSize || 0);
+            const reductionRate = result.originalSize > 0
+              ? Math.max(0, (reduction / result.originalSize) * 100).toFixed(1)
+              : '0.0';
+
+            spinner.succeed(chalk.green(`${displayIndex} ${file}`));
+            console.log(`  元サイズ   : ${formatSize(result.originalSize)}`);
+            console.log(`  出力サイズ : ${formatSize(result.outputSize || 0)}`);
+            console.log(`  削減率     : ${reductionRate}%`);
+            console.log(`  出力先     : ${result.outputPath}`);
+            if (result.warning) {
+              console.log(chalk.yellow(`  警告       : ${result.warning}`));
+            }
+            console.log('');
+          } else {
+            failureCount++;
+            spinner.fail(chalk.red(`${displayIndex} ${file} - 失敗`));
+            console.log(chalk.red(`  エラー     : ${result.error}\n`));
+          }
+        }
+
+        const totalReduction = Math.max(0, totalOriginalSize - totalOutputSize);
+        console.log(chalk.bold.green('起動時処理完了\n'));
+        console.log(`対象ファイル数 : ${imageFiles.length}`);
+        console.log(`成功           : ${successCount}`);
+        console.log(`失敗           : ${failureCount}`);
+        console.log(`総削減容量     : ${formatSize(totalReduction)}\n`);
+      } else {
+        console.log(chalk.yellow('処理対象の画像が見つかりませんでした。\n'));
+      }
+    }
+
+    // 2. 監視の開始
+    console.log(chalk.green.bold('監視モードを起動しました。'));
+    console.log(chalk.gray(`監視ディレクトリ : ${cwd}`));
+    if (!options.recursive) {
+      console.log(chalk.gray('※サブディレクトリは監視されません。'));
+    }
+    console.log(chalk.gray('新しい画像が追加されるのを待っています... (終了するには Ctrl+C を押してください)\n'));
+
+    const { default: chokidar } = await import('chokidar');
+    const queue: string[] = [];
+    let processing = false;
+
+    const processQueue = async () => {
+      if (processing) return;
+      processing = true;
+
+      while (queue.length > 0) {
+        const file = queue.shift()!;
+        watchSuccessCount++;
+        const spinner = ora(`${file} を処理中...`).start();
+
+        const result = await optimizeImage(file, outputDir, {
+          format,
+          size: targetSize,
+          widthSpec,
+          heightSpec,
+          stretchMode,
+          keepMetadata: !!options.keep,
+          namePattern: options.name,
+          fileIndex: watchSuccessCount,
+          recursive: !!options.recursive,
+          cwd,
+          copyOnly,
+          hardDelete: !!options.hard,
+          trashOriginal: !!options.trash,
+        });
+
+        if (result.success) {
+          const reduction = result.originalSize - (result.outputSize || 0);
+          const reductionRate = result.originalSize > 0
+            ? Math.max(0, (reduction / result.originalSize) * 100).toFixed(1)
+            : '0.0';
+
+          spinner.succeed(chalk.green(`[新規追加] ${file}`));
+          console.log(`  元サイズ   : ${formatSize(result.originalSize)}`);
+          console.log(`  出力サイズ : ${formatSize(result.outputSize || 0)}`);
+          console.log(`  削減率     : ${reductionRate}%`);
+          console.log(`  出力先     : ${result.outputPath}`);
+          if (result.warning) {
+            console.log(chalk.yellow(`  警告       : ${result.warning}`));
+          }
+          console.log('');
+        } else {
+          spinner.fail(chalk.red(`[新規追加] ${file} - 失敗`));
+          console.log(chalk.red(`  エラー     : ${result.error}\n`));
+        }
+      }
+
+      processing = false;
+    };
+
+    const enqueue = (file: string) => {
+      queue.push(file);
+      processQueue();
+    };
+
+    const watcher = chokidar.watch(cwd, {
+      ignored: (filePath) => {
+        const absPath = path.resolve(filePath);
+        // node_modules と .git は無視
+        if (absPath.includes(`${path.sep}node_modules${path.sep}`) || absPath.includes(`${path.sep}.git${path.sep}`)) {
+          return true;
+        }
+        // 出力先ディレクトリは無視
+        if (absPath.startsWith(outputDir)) {
+          return true;
+        }
+        // 既存の ignoreDirs も無視
+        for (const dir of ignoreDirs) {
+          const ignoreAbs = path.resolve(cwd, dir);
+          if (absPath.startsWith(ignoreAbs)) {
+            return true;
+          }
+        }
+        // 隠しファイル/フォルダは無視
+        const base = path.basename(absPath);
+        if (base !== '.' && base !== '..' && base.startsWith('.')) {
+          return true;
+        }
+        return false;
+      },
+      persistent: true,
+      ignoreInitial: true,
+      depth: options.recursive ? undefined : 0,
+      awaitWriteFinish: {
+        stabilityThreshold: 1000,
+        pollInterval: 100,
+      },
+    });
+
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+
+    watcher.on('add', (filePath) => {
+      const ext = path.extname(filePath).toLowerCase();
+      if (allowedExtensions.includes(ext)) {
+        const relativePath = path.relative(cwd, filePath);
+        enqueue(relativePath);
+      }
+    });
+
+    await new Promise<void>((_resolve) => {
+      process.on('SIGINT', () => {
+        watcher.close();
+        console.log(chalk.yellow('\n監視を終了しました。'));
+        process.exit(0);
+      });
+    });
+
+    return;
+  }
+
+  let imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
+  if (imageFiles.length === 0) {
+    console.log(chalk.yellow('処理対象の画像が見つかりませんでした。'));
+    return;
+  }
+
+  if (options.pick) {
+    console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
+    try {
+      const selected = await checkbox({
+        message: '処理する画像を選択してください:',
+        choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
+        pageSize: 20,
+      });
+      if (selected.length === 0) {
+        console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
+        return;
+      }
+      imageFiles = selected;
+    } catch {
+      console.log(chalk.yellow('\n選択がキャンセルされました。'));
+      return;
+    }
+  }
+
+  if (options.confirm && options.pick) {
+    const confirmed = await promptForConfirmation(options, imageFiles);
+    if (confirmed === null) {
+      console.log(chalk.yellow('処理をキャンセルしました。'));
+      return;
+    }
+    options = confirmed;
+  }
 
   for (let i = 0; i < imageFiles.length; i++) {
     const file = imageFiles[i];

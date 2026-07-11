@@ -1,6 +1,6 @@
 {
   "name": "imgsqueeze-cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "IMG Squeeze CLI - Image optimization CLI tool",
   "type": "module",
   "main": "dist/index.js",
@@ -18,6 +18,7 @@
   "dependencies": {
     "@inquirer/prompts": "^8.5.2",
     "chalk": "^5.6.2",
+    "chokidar": "^5.0.0",
     "commander": "^15.0.0",
     "fast-glob": "^3.3.3",
     "ora": "^9.4.1",
