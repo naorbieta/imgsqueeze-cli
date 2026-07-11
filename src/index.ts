@@ -651,8 +651,7 @@ async function main(): Promise<void> {
       { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
       { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(options.directory) },
       { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
-      { label: '監視モード', flag: '-w', value: options.watch ? '有効' : undefined },
-      { label: '初期処理スキップ', flag: '--no-initial', value: options.initial === false ? '有効' : undefined },
+      { label: '監視モード', flag: '-w', value: options.watch ? (options.initial === false ? '有効/初期処理をスキップ' : '有効') : undefined },
     ]);
   }
 
