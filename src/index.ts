@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { checkbox, input } from '@inquirer/prompts';
 import { scanImages, parseSize, formatSize, resolveOutputDir } from './utils.js';
+import { getPreset, savePreset, deletePreset, listPresets } from './preset.js';
 
 type StoredOptions = {
   format?: string;
@@ -27,8 +28,59 @@ type StoredOptions = {
 type EffectiveOptions = StoredOptions;
 
 const program = new Command();
-const stateFilePath = path.join(os.homedir(), '.imsq.json');
+const imsqDir = path.join(os.homedir(), '.imsq');
+const stateFilePath = path.join(imsqDir, 'options.json');
 
+// ----- preset サブコマンド -----
+program
+  .command('preset', { isDefault: false })
+  .description('プリセット管理 (引数なし: 一覧表示, <name>: 読み込み, save <name>: 保存, delete <name>: 削除)')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async () => {
+    const args = process.argv.slice(3);
+    const first = args[0];
+    const second = args[1];
+
+    if (!first) {
+      // imsq preset → 一覧表示
+      listPresets();
+      process.exit(0);
+    }
+
+    if (first === 'save') {
+      // imsq preset save <name>
+      if (!second) {
+        console.error(chalk.red('エラー: プリセット名を指定してください。例: imsq preset save mypreset'));
+        process.exit(1);
+      }
+      const stored = readStoredOptions();
+      savePreset(second, stored);
+      console.log(chalk.green(`プリセット "${second}" を保存しました。`));
+      process.exit(0);
+    }
+
+    if (first === 'delete' || first === 'del' || first === 'rm') {
+      // imsq preset delete <name|index>
+      if (!second) {
+        console.error(chalk.red('エラー: プリセット名または番号を指定してください。例: imsq preset delete 1'));
+        process.exit(1);
+      }
+      const deleted = deletePreset(second);
+      if (deleted) {
+        console.log(chalk.green(`プリセット "${deleted}" を削除しました。`));
+      } else {
+        console.error(chalk.red(`エラー: プリセット "${second}" が見つかりません。`));
+        process.exit(1);
+      }
+      process.exit(0);
+    }
+
+    // imsq preset <name|index> → プリセット読み込みで main() へ続行
+    process.env.__IMSQ_PRESET__ = first;
+  });
+
+// ----- メインコマンド -----
 program
   .name('imsq')
   .description('IMG Squeeze CLI - 画像最適化CLIツール (カレントディレクトリ内の画像を最適化して出力します)')
@@ -45,8 +97,9 @@ program
   .option('--hard', '出力成功後に元ファイルをゴミ箱へ送らず削除する')
   .option('--trash', '出力成功後に元ファイルをゴミ箱へ送る')
   .option('-w, --watch', '監視モード: ディレクトリ内を監視して、新しい画像が増えたら自動で処理する')
-  .option('--no-initial', '監視モード時、起動時に存在するファイルの処理をスキップする')
-  .parse(process.argv);
+  .option('--no-initial', '監視モード時、起動時に存在するファイルの処理をスキップする');
+
+await program.parseAsync(process.argv);
 
 function parseLengthOption(length: string): {
   widthSpec?: number | string;
@@ -258,6 +311,7 @@ function writeStoredOptions(options: StoredOptions): void {
       name: options.name,
       directory: options.directory,
     };
+    fs.mkdirSync(imsqDir, { recursive: true });
     fs.writeFileSync(stateFilePath, JSON.stringify({ options: persisted }, null, 2));
   } catch {
     // 状態保存は失敗しても処理を継続する
@@ -572,6 +626,22 @@ async function promptForConfirmation(
 
 async function main(): Promise<void> {
   let options = extractEffectiveOptions();
+
+  // プリセット読み込み (imsq preset <name> で起動された場合)
+  const presetArg = process.env.__IMSQ_PRESET__;
+  if (presetArg) {
+    const found = getPreset(presetArg);
+    if (!found) {
+      console.error(chalk.red(`エラー: プリセット "${presetArg}" が見つかりません。`));
+      console.log(chalk.gray('  imsq preset  で一覧を確認できます。'));
+      process.exit(1);
+    }
+    console.log(chalk.cyan(`プリセット "${found.presetName}" を読み込みました。`));
+    // CLIで明示指定されたオプションをプリセットより優先してマージ
+    const cliExplicit = normalizeOptions(program.opts());
+    options = mergeOptions(found.options, cliExplicit);
+  }
+
   const cwd = process.cwd();
   const hadConfirmPrompt = options.confirm;
 
