@@ -482,6 +482,21 @@ function isPromptAbortError(err: unknown): boolean {
     || message.includes('SIGINT');
 }
 
+async function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let content = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('readable', () => {
+      let chunk;
+      while ((chunk = process.stdin.read()) !== null) {
+        content += chunk;
+      }
+    });
+    process.stdin.on('end', () => resolve(content));
+    process.stdin.on('error', (err) => reject(err));
+  });
+}
+
 async function promptForConfirmation(
   options: EffectiveOptions,
   selectedFiles?: string[]
@@ -550,9 +565,21 @@ async function promptForConfirmation(
 }
 
 async function main(): Promise<void> {
+  const isPipe = !process.stdin.isTTY;
   let options = extractEffectiveOptions();
   const cwd = process.cwd();
   const hadConfirmPrompt = options.confirm;
+
+  if (isPipe) {
+    if (options.pick) {
+      console.error(chalk.red('エラー: 標準入力からのパイプ接続時は対話モード (-p, --pick) を使用できません。'));
+      process.exit(1);
+    }
+    if (options.confirm) {
+      console.error(chalk.red('エラー: 標準入力からのパイプ接続時は確認モード (-c, --confirm) を使用できません。'));
+      process.exit(1);
+    }
+  }
 
   if (options.hard && options.trash) {
     console.error(chalk.red('エラー: --hard と --trash は同時に指定できません。'));
@@ -575,84 +602,97 @@ async function main(): Promise<void> {
     ignoreDirs.push(outputDirName);
   }
 
-  let imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
-  if (imageFiles.length === 0) {
-    console.log(chalk.yellow('処理対象の画像が見つかりませんでした。'));
-    return;
-  }
+  const targetFiles: Array<{ file: string; fileOptions: StoredOptions }> = [];
 
-  if (options.pick) {
-    console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
-    try {
-      const selected = await checkbox({
-        message: '処理する画像を選択してください:',
-        choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
-        pageSize: 20,
-      });
-      if (selected.length === 0) {
-        console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
+  if (isPipe) {
+    const stdinContent = await readStdin();
+    const lines = stdinContent.split(/\r?\n/);
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+
+      const tokens = tokenizeArgString(trimmed);
+      if (tokens.length === 0) {
+        continue;
+      }
+
+      const file = tokens[0];
+      let fileOptions = options;
+
+      if (tokens.length > 1) {
+        try {
+          const overrideOptions = parseOptionTokens(tokens.slice(1));
+          fileOptions = mergeOptions(options, overrideOptions);
+        } catch (err: any) {
+          console.error(chalk.red(`行のパースエラー ("${trimmed}"): ${err.message}`));
+          continue;
+        }
+      }
+
+      targetFiles.push({ file, fileOptions });
+    }
+
+    if (targetFiles.length === 0) {
+      console.log(chalk.yellow('標準入力から処理対象の画像リストが読み込めませんでした。'));
+      return;
+    }
+  } else {
+    let imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
+    if (imageFiles.length === 0) {
+      console.log(chalk.yellow('処理対象の画像が見つかりませんでした。'));
+      return;
+    }
+
+    if (options.pick) {
+      console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
+      try {
+        const selected = await checkbox({
+          message: '処理する画像を選択してください:',
+          choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
+          pageSize: 20,
+        });
+        if (selected.length === 0) {
+          console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
+          return;
+        }
+        imageFiles = selected;
+      } catch {
+        console.log(chalk.yellow('\n選択がキャンセルされました。'));
         return;
       }
-      imageFiles = selected;
-    } catch {
-      console.log(chalk.yellow('\n選択がキャンセルされました。'));
-      return;
+    }
+
+    if (options.confirm && options.pick) {
+      const confirmed = await promptForConfirmation(options, imageFiles);
+      if (confirmed === null) {
+        console.log(chalk.yellow('処理をキャンセルしました。'));
+        return;
+      }
+      options = confirmed;
+    }
+
+    for (const file of imageFiles) {
+      targetFiles.push({ file, fileOptions: options });
     }
   }
 
-  if (options.confirm && options.pick) {
-    const confirmed = await promptForConfirmation(options, imageFiles);
-    if (confirmed === null) {
-      console.log(chalk.yellow('処理をキャンセルしました。'));
-      return;
+  if (!hadConfirmPrompt && !isPipe) {
+    let stretchModeGlobal = false;
+    if (options.length) {
+      try {
+        const parsed = parseLengthOption(options.length);
+        stretchModeGlobal = parsed.stretchMode;
+      } catch {}
     }
-    options = confirmed;
-  }
+    const resizeValue = options.length
+      ? formatLengthForSummary(options.length) + (stretchModeGlobal ? ' (ストレッチ)' : '')
+      : undefined;
 
-  const allowedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-  let format = options.format?.toLowerCase();
-  if (format) {
-    if (!allowedFormats.includes(format)) {
-      console.error(chalk.red(`エラー: サポートされていないフォーマットです: ${options.format}`));
-      console.log(chalk.gray(`サポートされている形式: ${allowedFormats.join(', ')}`));
-      process.exit(1);
-    }
-  }
-
-  let targetSize: number | undefined;
-  if (options.size) {
-    try {
-      targetSize = parseSize(options.size);
-    } catch (err: any) {
-      console.error(chalk.red(`エラー: ${err.message}`));
-      process.exit(1);
-    }
-  }
-
-  let widthSpec: number | string | undefined;
-  let heightSpec: number | string | undefined;
-  let stretchMode = false;
-  if (options.length) {
-    try {
-      const parsed = parseLengthOption(options.length);
-      widthSpec = parsed.widthSpec;
-      heightSpec = parsed.heightSpec;
-      stretchMode = parsed.stretchMode;
-    } catch (err: any) {
-      console.error(chalk.red(`エラー: ${err.message}`));
-      process.exit(1);
-    }
-  }
-
-  outputDir = resolveOutputDir(cwd, options.directory);
-
-  const resizeValue = options.length
-    ? formatLengthForSummary(options.length) + (stretchMode ? ' (ストレッチ)' : '')
-    : undefined;
-
-  if (!hadConfirmPrompt) {
     printOptionSummary([
-      { label: 'フォーマット', flag: '-f', value: format },
+      { label: 'フォーマット', flag: '-f', value: options.format?.toLowerCase() },
       { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
       { label: 'リサイズ', flag: '-l', value: resizeValue },
       { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
@@ -664,19 +704,64 @@ async function main(): Promise<void> {
     ]);
   }
 
+  outputDir = resolveOutputDir(cwd, options.directory);
   const outputDirLabel = displayOutputDir(cwd, outputDir, options.directory);
   console.log(chalk.blue(`\n出力先ディレクトリ: ${outputDirLabel}/\n`));
   const { ora, optimizeImage } = await loadProcessingDeps();
-  const copyOnly = onlyRenameRequested(options);
 
   let successCount = 0;
   let failureCount = 0;
   let totalOriginalSize = 0;
   let totalOutputSize = 0;
 
-  for (let i = 0; i < imageFiles.length; i++) {
-    const file = imageFiles[i];
-    const displayIndex = `[${i + 1}/${imageFiles.length}]`;
+  const allowedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+
+  for (let i = 0; i < targetFiles.length; i++) {
+    const { file, fileOptions } = targetFiles[i];
+
+    if (fileOptions.hard && fileOptions.trash) {
+      failureCount++;
+      console.error(chalk.red(`エラー: ${file} - --hard と --trash は同時に指定できません。スキップします。`));
+      continue;
+    }
+
+    const format = fileOptions.format?.toLowerCase();
+    if (format && !allowedFormats.includes(format)) {
+      failureCount++;
+      console.error(chalk.red(`エラー: ${file} - サポートされていないフォーマットです: ${fileOptions.format}`));
+      continue;
+    }
+
+    let targetSize: number | undefined;
+    if (fileOptions.size) {
+      try {
+        targetSize = parseSize(fileOptions.size);
+      } catch (err: any) {
+        failureCount++;
+        console.error(chalk.red(`エラー: ${file} - ${err.message}`));
+        continue;
+      }
+    }
+
+    let widthSpec: number | string | undefined;
+    let heightSpec: number | string | undefined;
+    let stretchMode = false;
+    if (fileOptions.length) {
+      try {
+        const parsed = parseLengthOption(fileOptions.length);
+        widthSpec = parsed.widthSpec;
+        heightSpec = parsed.heightSpec;
+        stretchMode = parsed.stretchMode;
+      } catch (err: any) {
+        failureCount++;
+        console.error(chalk.red(`エラー: ${file} - ${err.message}`));
+        continue;
+      }
+    }
+
+    const copyOnly = onlyRenameRequested(fileOptions);
+
+    const displayIndex = `[${i + 1}/${targetFiles.length}]`;
     const spinner = ora(`${displayIndex} ${file} を処理中...`).start();
 
     const result = await optimizeImage(file, outputDir, {
@@ -685,14 +770,14 @@ async function main(): Promise<void> {
       widthSpec,
       heightSpec,
       stretchMode,
-      keepMetadata: !!options.keep,
-      namePattern: options.name,
+      keepMetadata: !!fileOptions.keep,
+      namePattern: fileOptions.name,
       fileIndex: i + 1,
-      recursive: !!options.recursive,
+      recursive: !!fileOptions.recursive,
       cwd,
       copyOnly,
-      hardDelete: !!options.hard,
-      trashOriginal: !!options.trash,
+      hardDelete: !!fileOptions.hard,
+      trashOriginal: !!fileOptions.trash,
     });
 
     if (result.success) {
@@ -727,7 +812,7 @@ async function main(): Promise<void> {
   const totalReduction = Math.max(0, totalOriginalSize - totalOutputSize);
 
   console.log(chalk.bold.green('処理完了\n'));
-  console.log(`対象ファイル数 : ${imageFiles.length}`);
+  console.log(`対象ファイル数 : ${targetFiles.length}`);
   console.log(`成功           : ${successCount}`);
   console.log(`失敗           : ${failureCount}`);
   console.log(`総削減容量     : ${formatSize(totalReduction)}`);
