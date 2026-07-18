@@ -111,6 +111,8 @@ export function savePreset(name: string, options: StoredOptions): void {
     keep: options.keep || undefined,
     name: options.name,
     directory: options.directory,
+    hard: options.hard || undefined,
+    trash: options.trash || undefined,
   };
   presets[name] = persisted;
   writePresetFile(presets);
@@ -175,6 +177,8 @@ function printPresetOptions(opts: StoredOptions): void {
     ['リネーム', opts.name],
     ['再帰処理', opts.recursive ? '有効' : undefined],
     ['出力先指定', opts.directory],
+    ['元ファイル削除', opts.hard ? '有効' : undefined],
+    ['元ファイルゴミ箱移動', opts.trash ? '有効' : undefined],
   ];
 
   const rows = checks.filter(([, v]) => v !== undefined && v !== null && v !== false);

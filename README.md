@@ -275,6 +275,7 @@ imsq -p -n "thumb_***" -f jpg
 ## プリセット機能
 
 よく使う設定の組み合わせを名前付きで保存し、`imsq preset <name>` でいつでも呼び出せます。
+また、プリセット名がコマンド（`preset`, `help`）やオプション（`-` で始まる引数）と重複していなければ、`preset` を省略して **`imsq <name>`** で直接実行することも可能です。
 
 ### コマンド
 
@@ -285,10 +286,15 @@ imsq preset
 # プリセットを読み込んで処理実行
 imsq preset web
 imsq preset 1          # 番号（1-indexed）でも指定可
+imsq web               # preset を省略して直接実行！
+imsq 1                 # 番号でも直接実行！
 
-# 現在の保存済みオプション（~/.imsq/options.json）をプリセットとして保存
-imsq preset save web
-imsq preset save width1200
+# 指定したオプションを直接プリセットとして保存
+imsq preset save web -f webp
+imsq preset save width1200 -l w:1200 -k
+
+# オプションを指定しない場合は、直前に通常実行した設定（~/.imsq/options.json）を保存
+imsq preset save my_last_run
 
 # プリセットを削除
 imsq preset delete web
@@ -340,8 +346,10 @@ directory = "./thumbs"
 | `keep` | 真偽値 | `-k` | `true` / `false` |
 | `name` | 文字列 | `-n` | `"?_opt"`, `"img_***"` |
 | `directory` | 文字列 | `-d` | `"./output"`, `"."` |
+| `hard` | 真偽値 | `--hard` | `true` / `false` |
+| `trash` | 真偽値 | `--trash` | `true` / `false` |
 
-> **注意**: `-p`（対話モード）、`-c`（確認モード）、`--hard`、`--trash`、`-w`（監視モード）はプリセットに保存・読み込みされません。毎回明示指定してください。
+> **注意**: `-p`（対話モード）、`-c`（確認モード）、`-w`（監視モード）はプリセットに保存・読み込みされません。毎回明示指定してください。
 
 
 ---

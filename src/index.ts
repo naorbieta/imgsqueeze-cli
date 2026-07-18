@@ -49,12 +49,25 @@ program
     }
 
     if (first === 'save') {
-      // imsq preset save <name>
+      // imsq preset save <name> [options]
       if (!second) {
         console.error(chalk.red('エラー: プリセット名を指定してください。例: imsq preset save mypreset'));
         process.exit(1);
       }
-      const stored = readStoredOptions();
+      
+      const optionTokens = args.slice(2);
+      let stored: StoredOptions;
+      if (optionTokens.length > 0) {
+        try {
+          stored = parseOptionTokens(optionTokens);
+        } catch (err: any) {
+          console.error(chalk.red(`エラー: オプションのパースに失敗しました: ${err.message}`));
+          process.exit(1);
+        }
+      } else {
+        stored = readStoredOptions(true);
+      }
+
       savePreset(second, stored);
       console.log(chalk.green(`プリセット "${second}" を保存しました。`));
       process.exit(0);
@@ -97,7 +110,21 @@ program
   .option('--hard', '出力成功後に元ファイルをゴミ箱へ送らず削除する')
   .option('--trash', '出力成功後に元ファイルをゴミ箱へ送る')
   .option('-w, --watch', '監視モード: ディレクトリ内を監視して、新しい画像が増えたら自動で処理する')
-  .option('--no-initial', '監視モード時、起動時に存在するファイルの処理をスキップする');
+  .option('--no-initial', '監視モード時、起動時に存在するファイルの処理をスキップする')
+  .action(() => {});
+
+const firstArg = process.argv[2];
+if (firstArg && !firstArg.startsWith('-') && firstArg !== 'preset' && firstArg !== 'help') {
+  const found = getPreset(firstArg);
+  if (found) {
+    process.env.__IMSQ_PRESET__ = firstArg;
+    process.argv.splice(2, 1);
+  } else {
+    console.error(chalk.red(`エラー: 未知のコマンドまたはプリセットです: "${firstArg}"`));
+    console.log(chalk.gray('  imsq preset  で登録済みのプリセット一覧を確認できます。'));
+    process.exit(1);
+  }
+}
 
 await program.parseAsync(process.argv);
 
@@ -282,12 +309,16 @@ function printSelectedFilesSummary(fileNames: string[]): void {
   console.log('');
 }
 
-function readStoredOptions(): StoredOptions {
+function readStoredOptions(raw = false): StoredOptions {
   try {
-    const raw = fs.readFileSync(stateFilePath, 'utf8');
-    const parsed = JSON.parse(raw) as { options?: StoredOptions };
+    const fileRaw = fs.readFileSync(stateFilePath, 'utf8');
+    const parsed = JSON.parse(fileRaw) as { options?: StoredOptions };
+    const opts = parsed.options ?? {};
+    if (raw) {
+      return opts;
+    }
     return {
-      ...(parsed.options ?? {}),
+      ...opts,
       pick: false,
       confirm: false,
       hard: false,
@@ -310,6 +341,8 @@ function writeStoredOptions(options: StoredOptions): void {
       keep: options.keep,
       name: options.name,
       directory: options.directory,
+      hard: options.hard,
+      trash: options.trash,
     };
     fs.mkdirSync(imsqDir, { recursive: true });
     fs.writeFileSync(stateFilePath, JSON.stringify({ options: persisted }, null, 2));
@@ -334,16 +367,16 @@ function normalizeOptions(raw: Record<string, unknown>): StoredOptions {
     format: normalizeOptionValue(typeof raw.format === 'string' ? raw.format : undefined),
     size: normalizeOptionValue(typeof raw.size === 'string' ? raw.size : undefined),
     length: normalizeOptionValue(typeof raw.length === 'string' ? raw.length : undefined),
-    recursive: !!raw.recursive,
-    keep: !!raw.keep,
+    recursive: raw.recursive !== undefined ? !!raw.recursive : undefined,
+    keep: raw.keep !== undefined ? !!raw.keep : undefined,
     name: normalizeOptionValue(typeof raw.name === 'string' ? raw.name : undefined),
-    pick: !!raw.pick,
+    pick: raw.pick !== undefined ? !!raw.pick : undefined,
     directory: normalizeOptionValue(typeof raw.directory === 'string' ? raw.directory : undefined),
-    confirm: !!raw.confirm,
-    hard: !!raw.hard,
-    trash: !!raw.trash,
-    watch: !!raw.watch,
-    initial: raw.initial !== false,
+    confirm: raw.confirm !== undefined ? !!raw.confirm : undefined,
+    hard: raw.hard !== undefined ? !!raw.hard : undefined,
+    trash: raw.trash !== undefined ? !!raw.trash : undefined,
+    watch: raw.watch !== undefined ? !!raw.watch : undefined,
+    initial: raw.initial !== undefined ? raw.initial !== false : undefined,
   };
 }
 
