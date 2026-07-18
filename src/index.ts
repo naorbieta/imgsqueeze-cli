@@ -283,6 +283,25 @@ function padVisual(text: string, targetWidth: number): string {
   return text + ' '.repeat(Math.max(0, targetWidth - visualWidth(text)));
 }
 
+function printFileResult(result: { originalSize: number; outputSize?: number; outputPath?: string; warning?: string }, label: string): void {
+  const outputSize = result.outputSize ?? 0;
+  const reduction = result.originalSize - outputSize;
+  const increased = reduction < 0;
+  const rateRaw = result.originalSize > 0 ? (reduction / result.originalSize) * 100 : 0;
+  const reductionRate = increased
+    ? chalk.yellow(`+${Math.abs(rateRaw).toFixed(1)}%（増加）`)
+    : `${rateRaw.toFixed(1)}%`;
+
+  console.log(`  元サイズ   : ${formatSize(result.originalSize)}`);
+  console.log(`  出力サイズ : ${formatSize(outputSize)}`);
+  console.log(`  削減率     : ${reductionRate}`);
+  console.log(`  出力先     : ${result.outputPath}`);
+  if (result.warning) {
+    console.log(chalk.yellow(`  警告       : ${result.warning}`));
+  }
+  console.log('');
+}
+
 function printOptionSummary(rows: Array<{ label: string; flag: string; value?: string }>): void {
   const labelWidth = Math.max(...rows.map((row) => visualWidth(row.label)));
 
@@ -803,20 +822,8 @@ async function main(): Promise<void> {
             totalOriginalSize += result.originalSize;
             totalOutputSize += result.outputSize || 0;
 
-            const reduction = result.originalSize - (result.outputSize || 0);
-            const reductionRate = result.originalSize > 0
-              ? Math.max(0, (reduction / result.originalSize) * 100).toFixed(1)
-              : '0.0';
-
             spinner.succeed(chalk.green(`${displayIndex} ${file}`));
-            console.log(`  元サイズ   : ${formatSize(result.originalSize)}`);
-            console.log(`  出力サイズ : ${formatSize(result.outputSize || 0)}`);
-            console.log(`  削減率     : ${reductionRate}%`);
-            console.log(`  出力先     : ${result.outputPath}`);
-            if (result.warning) {
-              console.log(chalk.yellow(`  警告       : ${result.warning}`));
-            }
-            console.log('');
+            printFileResult(result, file);
           } else {
             failureCount++;
             spinner.fail(chalk.red(`${displayIndex} ${file} - 失敗`));
@@ -824,12 +831,15 @@ async function main(): Promise<void> {
           }
         }
 
-        const totalReduction = Math.max(0, totalOriginalSize - totalOutputSize);
+        const netReductionWatch = totalOriginalSize - totalOutputSize;
+        const totalReductionWatchLabel = netReductionWatch >= 0
+          ? formatSize(netReductionWatch)
+          : chalk.yellow(`-${formatSize(Math.abs(netReductionWatch))}（増加）`);
         console.log(chalk.bold.green('起動時処理完了\n'));
         console.log(`対象ファイル数 : ${imageFiles.length}`);
         console.log(`成功           : ${successCount}`);
         console.log(`失敗           : ${failureCount}`);
-        console.log(`総削減容量     : ${formatSize(totalReduction)}\n`);
+        console.log(`総削減容量     : ${totalReductionWatchLabel}\n`);
       } else {
         console.log(chalk.yellow('処理対象の画像が見つかりませんでした。\n'));
       }
@@ -873,20 +883,8 @@ async function main(): Promise<void> {
         });
 
         if (result.success) {
-          const reduction = result.originalSize - (result.outputSize || 0);
-          const reductionRate = result.originalSize > 0
-            ? Math.max(0, (reduction / result.originalSize) * 100).toFixed(1)
-            : '0.0';
-
           spinner.succeed(chalk.green(`[新規追加] ${file}`));
-          console.log(`  元サイズ   : ${formatSize(result.originalSize)}`);
-          console.log(`  出力サイズ : ${formatSize(result.outputSize || 0)}`);
-          console.log(`  削減率     : ${reductionRate}%`);
-          console.log(`  出力先     : ${result.outputPath}`);
-          if (result.warning) {
-            console.log(chalk.yellow(`  警告       : ${result.warning}`));
-          }
-          console.log('');
+          printFileResult(result, file);
         } else {
           spinner.fail(chalk.red(`[新規追加] ${file} - 失敗`));
           console.log(chalk.red(`  エラー     : ${result.error}\n`));
@@ -1016,20 +1014,8 @@ async function main(): Promise<void> {
       totalOriginalSize += result.originalSize;
       totalOutputSize += result.outputSize || 0;
 
-      const reduction = result.originalSize - (result.outputSize || 0);
-      const reductionRate = result.originalSize > 0
-        ? Math.max(0, (reduction / result.originalSize) * 100).toFixed(1)
-        : '0.0';
-
       spinner.succeed(chalk.green(`${displayIndex} ${file}`));
-      console.log(`  元サイズ   : ${formatSize(result.originalSize)}`);
-      console.log(`  出力サイズ : ${formatSize(result.outputSize || 0)}`);
-      console.log(`  削減率     : ${reductionRate}%`);
-      console.log(`  出力先     : ${result.outputPath}`);
-      if (result.warning) {
-        console.log(chalk.yellow(`  警告       : ${result.warning}`));
-      }
-      console.log('');
+      printFileResult(result, file);
     } else {
       failureCount++;
       totalOriginalSize += result.originalSize;
@@ -1040,13 +1026,16 @@ async function main(): Promise<void> {
     }
   }
 
-  const totalReduction = Math.max(0, totalOriginalSize - totalOutputSize);
+  const netReduction = totalOriginalSize - totalOutputSize;
+  const totalReductionLabel = netReduction >= 0
+    ? formatSize(netReduction)
+    : chalk.yellow(`-${formatSize(Math.abs(netReduction))}（増加）`);
 
   console.log(chalk.bold.green('処理完了\n'));
   console.log(`対象ファイル数 : ${imageFiles.length}`);
   console.log(`成功           : ${successCount}`);
   console.log(`失敗           : ${failureCount}`);
-  console.log(`総削減容量     : ${formatSize(totalReduction)}`);
+  console.log(`総削減容量     : ${totalReductionLabel}`);
 
   writeStoredOptions(options);
 }

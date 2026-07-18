@@ -312,6 +312,22 @@ export async function optimizeImage(
       finalBuffer = await compress(sharpInstance, formatName, 80);
     }
 
+    // 圧縮後サイズが元ファイルより大きい場合の処理
+    const formatChanged = targetExt !== originalExt;
+    if (finalBuffer.length > originalSize) {
+      if (!formatChanged) {
+        // フォーマット変換なし: 元ファイルをそのまま使う
+        finalBuffer = fs.readFileSync(absoluteInputPath);
+        const msg = '圧縮後サイズが元より大きいため元ファイルを使用しました';
+        warning = warning ? `${warning} / ${msg}` : msg;
+      } else {
+        // フォーマット変換あり: 変換は維持するが警告
+        const increase = finalBuffer.length - originalSize;
+        const msg = `変換後サイズが元より大きくなりました (+${increase}B)`;
+        warning = warning ? `${warning} / ${msg}` : msg;
+      }
+    }
+
     const tempOutputPath = createTempOutputPath(absoluteOutputPath);
     try {
       fs.writeFileSync(tempOutputPath, finalBuffer);
