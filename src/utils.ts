@@ -4,20 +4,53 @@ import path from 'node:path';
 import fg from 'fast-glob';
 
 /**
- * CLI設定・状態ファイルの保存ディレクトリパスを返す
- * 1. $XDG_CONFIG_HOME/imsq (指定されていれば)
- * 2. ~/.config/imsq/
- * 3. 互換性のための既存 ~/.imsq/ (上記が存在せず、旧パスが存在する場合)
+ * CLI設定・状態ファイルの保存ディレクトリパスを返す。
+ * 旧パス (~/.imsq/) が存在して新パス (~/.config/imsq/) がまだない場合は
+ * 自動的にファイルを移行してから新パスを返す。
+ *
+ * 優先順位:
+ *  1. $XDG_CONFIG_HOME/imsq
+ *  2. ~/.config/imsq/
+ *  (旧パスのみ存在する場合は自動移行のうえ上記へ)
  */
 export function getImsqDir(): string {
   const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
   const primaryDir = path.join(configHome, 'imsq');
   const legacyDir = path.join(os.homedir(), '.imsq');
 
-  if (!fs.existsSync(primaryDir) && fs.existsSync(legacyDir)) {
-    return legacyDir;
+  const legacyExists = fs.existsSync(legacyDir);
+  const primaryExists = fs.existsSync(primaryDir);
+
+  if (legacyExists && !primaryExists) {
+    // 旧ディレクトリを新ディレクトリへ移行
+    try {
+      fs.renameSync(legacyDir, primaryDir);
+    } catch {
+      // 異なるファイルシステム間など rename が使えない場合はコピー+削除
+      try {
+        copyDirRecursive(legacyDir, primaryDir);
+        fs.rmSync(legacyDir, { recursive: true, force: true });
+      } catch {
+        // 移行に失敗してもクラッシュさせない。旧パスを引き続き使う。
+        return legacyDir;
+      }
+    }
   }
+
   return primaryDir;
+}
+
+function copyDirRecursive(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
 }
 
 /**
