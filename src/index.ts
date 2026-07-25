@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { checkbox, input } from '@inquirer/prompts';
-import { scanImages, parseSize, formatSize, resolveOutputDir } from './utils.js';
+import { scanImages, parseSize, formatSize, resolveOutputDir, getImsqDir } from './utils.js';
 import { getPreset, savePreset, deletePreset, listPresets } from './preset.js';
+import { readUserConfig } from './config.js';
 
 type StoredOptions = {
   format?: string;
@@ -23,13 +23,16 @@ type StoredOptions = {
   trash?: boolean;
   watch?: boolean;
   initial?: boolean;
+  poll?: boolean;
 };
 
 type EffectiveOptions = StoredOptions;
 
 const program = new Command();
-const imsqDir = path.join(os.homedir(), '.imsq');
-const stateFilePath = path.join(imsqDir, 'options.json');
+
+function getStateFilePath(): string {
+  return path.join(getImsqDir(), 'options.json');
+}
 
 // ----- preset サブコマンド -----
 program
@@ -111,6 +114,7 @@ program
   .option('--trash', '出力成功後に元ファイルをゴミ箱へ送る')
   .option('-w, --watch', '監視モード: ディレクトリ内を監視して、新しい画像が増えたら自動で処理する')
   .option('--no-initial', '監視モード時、起動時に存在するファイルの処理をスキップする')
+  .option('--poll', '監視モードでポーリング方式(usePolling)を使用する (WSLやネットワークドライブ環境向け)')
   .action(() => {});
 
 const firstArg = process.argv[2];
@@ -329,8 +333,11 @@ function printSelectedFilesSummary(fileNames: string[]): void {
 }
 
 function readStoredOptions(raw = false): StoredOptions {
+  const userConfig = readUserConfig();
+  const defaultPoll = userConfig.watch?.poll ?? userConfig.poll;
+
   try {
-    const fileRaw = fs.readFileSync(stateFilePath, 'utf8');
+    const fileRaw = fs.readFileSync(getStateFilePath(), 'utf8');
     const parsed = JSON.parse(fileRaw) as { options?: StoredOptions };
     const opts = parsed.options ?? {};
     if (raw) {
@@ -344,9 +351,12 @@ function readStoredOptions(raw = false): StoredOptions {
       trash: false,
       watch: false,
       initial: true,
+      poll: opts.poll ?? defaultPoll,
     };
   } catch {
-    return {};
+    return {
+      poll: defaultPoll,
+    };
   }
 }
 
@@ -362,9 +372,11 @@ function writeStoredOptions(options: StoredOptions): void {
       directory: options.directory,
       hard: options.hard,
       trash: options.trash,
+      poll: options.poll,
     };
+    const imsqDir = getImsqDir();
     fs.mkdirSync(imsqDir, { recursive: true });
-    fs.writeFileSync(stateFilePath, JSON.stringify({ options: persisted }, null, 2));
+    fs.writeFileSync(getStateFilePath(), JSON.stringify({ options: persisted }, null, 2));
   } catch {
     // 状態保存は失敗しても処理を継続する
   }
@@ -396,6 +408,7 @@ function normalizeOptions(raw: Record<string, unknown>): StoredOptions {
     trash: raw.trash !== undefined ? !!raw.trash : undefined,
     watch: raw.watch !== undefined ? !!raw.watch : undefined,
     initial: raw.initial !== undefined ? raw.initial !== false : undefined,
+    poll: raw.poll !== undefined ? !!raw.poll : undefined,
   };
 }
 
@@ -414,6 +427,7 @@ function mergeOptions(base: StoredOptions, override: StoredOptions): StoredOptio
     trash: override.trash ?? base.trash ?? false,
     watch: override.watch ?? base.watch ?? false,
     initial: override.initial ?? base.initial ?? true,
+    poll: override.poll ?? base.poll ?? false,
   };
 }
 
@@ -492,6 +506,9 @@ function parseOptionTokens(tokens: string[]): StoredOptions {
         break;
       case '--no-initial':
         parsed.initial = false;
+        break;
+      case '--poll':
+        parsed.poll = true;
         break;
       default:
         throw new Error(`無効な追加オプションです: ${token}`);
@@ -773,6 +790,7 @@ async function main(): Promise<void> {
       { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(options.directory) },
       { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
       { label: '監視モード', flag: '-w', value: options.watch ? (options.initial === false ? '有効/初期処理をスキップ' : '有効') : undefined },
+      { label: 'ポーリング監視', flag: '--poll', value: options.poll ? '有効' : undefined },
     ]);
   }
 
@@ -864,6 +882,9 @@ async function main(): Promise<void> {
     // 2. 監視の開始
     console.log(chalk.green.bold('監視モードを起動しました。'));
     console.log(chalk.gray(`監視ディレクトリ : ${cwd}`));
+    if (options.poll) {
+      console.log(chalk.gray('監視方式         : ポーリング (usePolling)'));
+    }
     if (!options.recursive) {
       console.log(chalk.gray('※サブディレクトリは監視されません。'));
     }
@@ -931,6 +952,7 @@ async function main(): Promise<void> {
       processQueue();
     };
 
+    const userConfig = readUserConfig();
     const watcher = chokidar.watch(cwd, {
       ignored: (filePath) => {
         const absPath = path.resolve(filePath);
@@ -954,6 +976,9 @@ async function main(): Promise<void> {
       },
       persistent: true,
       ignoreInitial: true,
+      usePolling: !!options.poll,
+      interval: userConfig.watch?.interval,
+      binaryInterval: userConfig.watch?.interval,
       depth: options.recursive ? undefined : 0,
       awaitWriteFinish: {
         stabilityThreshold: 1000,

@@ -1,6 +1,24 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import fg from 'fast-glob';
+
+/**
+ * CLI設定・状態ファイルの保存ディレクトリパスを返す
+ * 1. $XDG_CONFIG_HOME/imsq (指定されていれば)
+ * 2. ~/.config/imsq/
+ * 3. 互換性のための既存 ~/.imsq/ (上記が存在せず、旧パスが存在する場合)
+ */
+export function getImsqDir(): string {
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  const primaryDir = path.join(configHome, 'imsq');
+  const legacyDir = path.join(os.homedir(), '.imsq');
+
+  if (!fs.existsSync(primaryDir) && fs.existsSync(legacyDir)) {
+    return legacyDir;
+  }
+  return primaryDir;
+}
 
 /**
  * 容量指定の文字列をバイト数値に変換する (例: 100kb -> 102400)

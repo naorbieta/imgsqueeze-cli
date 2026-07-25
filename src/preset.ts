@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import chalk from 'chalk';
 import * as TOML from 'smol-toml';
+import { getImsqDir } from './utils.js';
 
 
 export type StoredOptions = {
@@ -19,14 +19,16 @@ export type StoredOptions = {
   trash?: boolean;
   watch?: boolean;
   initial?: boolean;
+  poll?: boolean;
 };
 
-const imsqDir = path.join(os.homedir(), '.imsq');
-const presetFilePath = path.join(imsqDir, 'presets.toml');
+function getPresetFilePath(): string {
+  return path.join(getImsqDir(), 'presets.toml');
+}
 
 function readPresetFile(): Record<string, StoredOptions> {
   try {
-    const raw = fs.readFileSync(presetFilePath, 'utf8');
+    const raw = fs.readFileSync(getPresetFilePath(), 'utf8');
     const parsed = TOML.parse(raw) as Record<string, Record<string, unknown>>;
     const result: Record<string, StoredOptions> = {};
     for (const [name, entry] of Object.entries(parsed)) {
@@ -55,6 +57,7 @@ function normalizePresetEntry(raw: Record<string, unknown>): StoredOptions {
     trash: typeof raw.trash === 'boolean' ? raw.trash : undefined,
     watch: typeof raw.watch === 'boolean' ? raw.watch : undefined,
     initial: typeof raw.initial === 'boolean' ? raw.initial : undefined,
+    poll: typeof raw.poll === 'boolean' ? raw.poll : undefined,
   };
 }
 
@@ -71,8 +74,9 @@ function writePresetFile(presets: Record<string, StoredOptions>): void {
       clean[name] = entry;
     }
     const content = TOML.stringify(clean);
+    const imsqDir = getImsqDir();
     fs.mkdirSync(imsqDir, { recursive: true });
-    fs.writeFileSync(presetFilePath, content, 'utf8');
+    fs.writeFileSync(getPresetFilePath(), content, 'utf8');
   } catch (err: any) {
     console.error(chalk.red(`プリセットの保存に失敗しました: ${err.message}`));
   }
@@ -113,6 +117,7 @@ export function savePreset(name: string, options: StoredOptions): void {
     directory: options.directory,
     hard: options.hard || undefined,
     trash: options.trash || undefined,
+    poll: options.poll || undefined,
   };
   presets[name] = persisted;
   writePresetFile(presets);
@@ -179,6 +184,7 @@ function printPresetOptions(opts: StoredOptions): void {
     ['出力先指定', opts.directory],
     ['元ファイル削除', opts.hard ? '有効' : undefined],
     ['元ファイルゴミ箱移動', opts.trash ? '有効' : undefined],
+    ['ポーリング監視', opts.poll ? '有効' : undefined],
   ];
 
   const rows = checks.filter(([, v]) => v !== undefined && v !== null && v !== false);
