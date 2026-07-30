@@ -640,6 +640,46 @@ async function readStdin(): Promise<string> {
   });
 }
 
+function formatWatchModeForSummary(options: EffectiveOptions): string | undefined {
+  if (!options.watch) {
+    return undefined;
+  }
+  const parts: string[] = ['有効'];
+  if (options.poll) {
+    parts.push('ポーリング');
+  }
+  if (options.initial === false) {
+    parts.push('初期処理をスキップ');
+  }
+  return parts.join('/');
+}
+
+function buildOptionSummaryRows(options: EffectiveOptions): Array<{ label: string; flag: string; value?: string }> {
+  let stretchModeGlobal = false;
+  if (options.length) {
+    try {
+      const parsed = parseLengthOption(options.length);
+      stretchModeGlobal = parsed.stretchMode;
+    } catch {}
+  }
+  const resizeValue = options.length
+    ? formatLengthForSummary(options.length) + (stretchModeGlobal ? ' (ストレッチ)' : '')
+    : undefined;
+
+  return [
+    { label: 'フォーマット', flag: '-f', value: options.format?.toLowerCase() },
+    { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
+    { label: 'リサイズ', flag: '-l', value: resizeValue },
+    { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
+    { label: 'リネーム', flag: '-n', value: options.name },
+    { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
+    { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
+    { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(options.directory) },
+    { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
+    { label: '監視モード', flag: '-w', value: formatWatchModeForSummary(options) },
+  ];
+}
+
 async function promptForConfirmation(
   options: EffectiveOptions,
   selectedFiles?: string[]
@@ -651,22 +691,7 @@ async function promptForConfirmation(
       printSelectedFilesSummary(selectedFiles);
     }
 
-    const resizeValue = current.length
-      ? formatLengthForSummary(current.length)
-      : undefined;
-
-    printOptionSummary([
-      { label: 'フォーマット', flag: '-f', value: current.format },
-      { label: '最大サイズ', flag: '-s', value: current.size ? formatSizeForSummary(current.size) : undefined },
-      { label: 'リサイズ', flag: '-l', value: resizeValue },
-      { label: 'メタデータ保持', flag: '-k', value: current.keep ? '有効' : undefined },
-      { label: 'リネーム', flag: '-n', value: current.name },
-      { label: '対話モード', flag: '-p', value: current.pick ? '有効' : undefined },
-      { label: '再帰処理', flag: '-r', value: current.recursive ? '有効' : undefined },
-      { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(current.directory) },
-      { label: '確認モード', flag: '-c', value: current.confirm ? '有効' : undefined },
-      { label: '監視モード', flag: '-w', value: current.watch ? (current.initial === false ? '有効/初期処理をスキップ' : '有効') : undefined },
-    ]);
+    printOptionSummary(buildOptionSummaryRows(current));
 
     let answer: string;
     try {
@@ -768,30 +793,7 @@ async function main(): Promise<void> {
   }
 
   if (!hadConfirmPrompt && !isPipe) {
-    let stretchModeGlobal = false;
-    if (options.length) {
-      try {
-        const parsed = parseLengthOption(options.length);
-        stretchModeGlobal = parsed.stretchMode;
-      } catch {}
-    }
-    const resizeValue = options.length
-      ? formatLengthForSummary(options.length) + (stretchModeGlobal ? ' (ストレッチ)' : '')
-      : undefined;
-
-    printOptionSummary([
-      { label: 'フォーマット', flag: '-f', value: options.format?.toLowerCase() },
-      { label: '最大サイズ', flag: '-s', value: options.size ? formatSizeForSummary(options.size) : undefined },
-      { label: 'リサイズ', flag: '-l', value: resizeValue },
-      { label: 'メタデータ保持', flag: '-k', value: options.keep ? '有効' : undefined },
-      { label: 'リネーム', flag: '-n', value: options.name },
-      { label: '対話モード', flag: '-p', value: options.pick ? '有効' : undefined },
-      { label: '再帰処理', flag: '-r', value: options.recursive ? '有効' : undefined },
-      { label: '出力先指定', flag: '-d', value: formatDirectoryForSummary(options.directory) },
-      { label: '確認モード', flag: '-c', value: options.confirm ? '有効' : undefined },
-      { label: '監視モード', flag: '-w', value: options.watch ? (options.initial === false ? '有効/初期処理をスキップ' : '有効') : undefined },
-      { label: 'ポーリング監視', flag: '--poll', value: options.poll ? '有効' : undefined },
-    ]);
+    printOptionSummary(buildOptionSummaryRows(options));
   }
 
   outputDir = resolveOutputDir(cwd, options.directory);
