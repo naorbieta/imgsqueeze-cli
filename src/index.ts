@@ -975,8 +975,8 @@ async function main(): Promise<void> {
     };
 
     const userConfig = readUserConfig();
-    const watcher = chokidar.watch(cwd, {
-      ignored: (filePath) => {
+    const watchOptions: any = {
+      ignored: (filePath: string) => {
         const absPath = path.resolve(filePath);
         const parts = absPath.split(path.sep);
         if (parts.includes('node_modules') || parts.includes('.git')) {
@@ -1000,14 +1000,22 @@ async function main(): Promise<void> {
       persistent: true,
       ignoreInitial: true,
       usePolling: !!options.poll,
-      interval: userConfig.watch?.interval,
-      binaryInterval: userConfig.watch?.interval,
-      depth: options.recursive ? undefined : 0,
       awaitWriteFinish: {
         stabilityThreshold: 1000,
         pollInterval: 100,
       },
-    });
+    };
+
+    if (!options.recursive) {
+      watchOptions.depth = 0;
+    }
+
+    if (userConfig.watch?.interval !== undefined) {
+      watchOptions.interval = userConfig.watch.interval;
+      watchOptions.binaryInterval = userConfig.watch.interval;
+    }
+
+    const watcher = chokidar.watch(cwd, watchOptions);
 
     const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
 
