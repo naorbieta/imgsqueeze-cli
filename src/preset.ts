@@ -27,19 +27,22 @@ function getPresetFilePath(): string {
 }
 
 function readPresetFile(): Record<string, StoredOptions> {
-  try {
-    const raw = fs.readFileSync(getPresetFilePath(), 'utf8');
-    const parsed = TOML.parse(raw) as Record<string, Record<string, unknown>>;
-    const result: Record<string, StoredOptions> = {};
-    for (const [name, entry] of Object.entries(parsed)) {
-      if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
-        result[name] = normalizePresetEntry(entry);
-      }
-    }
-    return result;
-  } catch {
+  const filePath = getPresetFilePath();
+  if (!fs.existsSync(filePath)) {
     return {};
   }
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const parsed = TOML.parse(raw) as Record<string, Record<string, unknown>>;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('TOMLフォーマットが不正です。オブジェクト形式である必要があります。');
+  }
+  const result: Record<string, StoredOptions> = {};
+  for (const [name, entry] of Object.entries(parsed)) {
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      result[name] = normalizePresetEntry(entry);
+    }
+  }
+  return result;
 }
 
 function normalizePresetEntry(raw: Record<string, unknown>): StoredOptions {
@@ -61,7 +64,7 @@ function normalizePresetEntry(raw: Record<string, unknown>): StoredOptions {
   };
 }
 
-function writePresetFile(presets: Record<string, StoredOptions>): void {
+function writePresetFile(presets: Record<string, StoredOptions>): boolean {
   try {
     const clean: Record<string, Record<string, unknown>> = {};
     for (const [name, opts] of Object.entries(presets)) {
@@ -77,14 +80,23 @@ function writePresetFile(presets: Record<string, StoredOptions>): void {
     const imsqDir = getImsqDir();
     fs.mkdirSync(imsqDir, { recursive: true });
     fs.writeFileSync(getPresetFilePath(), content, 'utf8');
+    return true;
   } catch (err: any) {
     console.error(chalk.red(`プリセットの保存に失敗しました: ${err.message}`));
+    return false;
   }
 }
 
 /** 名前または1-indexed番号でプリセットを取得する */
 export function getPreset(name: string): { presetName: string; options: StoredOptions } | undefined {
-  const presets = readPresetFile();
+  let presets: Record<string, StoredOptions>;
+  try {
+    presets = readPresetFile();
+  } catch (err: any) {
+    console.error(chalk.red(`エラー: プリセットファイルの読み込みに失敗しました: ${err.message}`));
+    console.error(chalk.yellow(`  既存のファイル (${getPresetFilePath()}) を確認・修正してください。`));
+    return undefined;
+  }
 
   // 名前で直接一致する場合
   if (presets[name] !== undefined) {
@@ -104,9 +116,16 @@ export function getPreset(name: string): { presetName: string; options: StoredOp
   return undefined;
 }
 
-/** プリセットを保存する（永続化する項目のみ） */
-export function savePreset(name: string, options: StoredOptions): void {
-  const presets = readPresetFile();
+/** プリセットを保存する（永続化する項目のみ）。保存成功時は true を返す */
+export function savePreset(name: string, options: StoredOptions): boolean {
+  let presets: Record<string, StoredOptions>;
+  try {
+    presets = readPresetFile();
+  } catch (err: any) {
+    console.error(chalk.red(`エラー: プリセットファイルの読み込みに失敗したため保存を中止しました: ${err.message}`));
+    console.error(chalk.yellow(`  既存のファイル (${getPresetFilePath()}) を確認・修正してください。`));
+    return false;
+  }
   const persisted: StoredOptions = {
     format: options.format,
     size: options.size,
@@ -120,18 +139,27 @@ export function savePreset(name: string, options: StoredOptions): void {
     poll: options.poll || undefined,
   };
   presets[name] = persisted;
-  writePresetFile(presets);
+  return writePresetFile(presets);
 }
 
 /** プリセットを削除する。成功すれば削除したプリセット名を返す */
 export function deletePreset(nameOrIndex: string): string | undefined {
-  const presets = readPresetFile();
+  let presets: Record<string, StoredOptions>;
+  try {
+    presets = readPresetFile();
+  } catch (err: any) {
+    console.error(chalk.red(`エラー: プリセットファイルの読み込みに失敗したため削除できません: ${err.message}`));
+    console.error(chalk.yellow(`  既存のファイル (${getPresetFilePath()}) を確認・修正してください。`));
+    return undefined;
+  }
 
   // 名前で直接一致する場合
   if (presets[nameOrIndex] !== undefined) {
     delete presets[nameOrIndex];
-    writePresetFile(presets);
-    return nameOrIndex;
+    if (writePresetFile(presets)) {
+      return nameOrIndex;
+    }
+    return undefined;
   }
 
   // 番号指定の場合
@@ -141,8 +169,10 @@ export function deletePreset(nameOrIndex: string): string | undefined {
     const entry = entries[index - 1];
     if (entry) {
       delete presets[entry[0]];
-      writePresetFile(presets);
-      return entry[0];
+      if (writePresetFile(presets)) {
+        return entry[0];
+      }
+      return undefined;
     }
   }
 
@@ -151,7 +181,14 @@ export function deletePreset(nameOrIndex: string): string | undefined {
 
 /** プリセット一覧をコンソールに表示する */
 export function listPresets(): void {
-  const presets = readPresetFile();
+  let presets: Record<string, StoredOptions>;
+  try {
+    presets = readPresetFile();
+  } catch (err: any) {
+    console.error(chalk.red(`エラー: プリセットファイルの読み込みに失敗しました: ${err.message}`));
+    console.error(chalk.yellow(`  既存のファイル (${getPresetFilePath()}) を確認・修正してください。`));
+    return;
+  }
   const entries = Object.entries(presets);
 
   if (entries.length === 0) {

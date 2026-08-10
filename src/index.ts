@@ -71,9 +71,17 @@ program
         stored = readStoredOptions(true);
       }
 
-      savePreset(second, stored);
-      console.log(chalk.green(`プリセット "${second}" を保存しました。`));
-      process.exit(0);
+      if (stored.hard && stored.trash) {
+        console.error(chalk.red('エラー: --hard と --trash は同時に指定できません。'));
+        process.exit(1);
+      }
+
+      if (savePreset(second, stored)) {
+        console.log(chalk.green(`プリセット "${second}" を保存しました。`));
+        process.exit(0);
+      } else {
+        process.exit(1);
+      }
     }
 
     if (first === 'delete' || first === 'del' || first === 'rm') {
@@ -494,11 +502,9 @@ function parseOptionTokens(tokens: string[]): StoredOptions {
         break;
       case '--hard':
         parsed.hard = true;
-        parsed.trash = false;
         break;
       case '--trash':
         parsed.trash = true;
-        parsed.hard = false;
         break;
       case '-w':
       case '--watch':
@@ -726,7 +732,12 @@ async function promptForConfirmation(
 
     try {
       const overrides = parseOptionTokens(tokens);
-      current = applyPromptOverrides(current, overrides);
+      const next = applyPromptOverrides(current, overrides);
+      if (next.hard && next.trash) {
+        console.error(chalk.red('エラー: --hard と --trash は同時に指定できません。'));
+        continue;
+      }
+      current = next;
     } catch (err: any) {
       console.error(chalk.red(`エラー: ${err.message}`));
     }
@@ -912,6 +923,8 @@ async function main(): Promise<void> {
     }
     const copyOnlyWatch = onlyRenameRequested(options);
 
+    const generatedFiles = new Set<string>();
+
     const processQueue = async () => {
       if (processing) return;
       processing = true;
@@ -938,6 +951,13 @@ async function main(): Promise<void> {
         });
 
         if (result.success) {
+          if (result.outputPath) {
+            const absOutput = path.resolve(cwd, result.outputPath);
+            const absInput = path.resolve(cwd, file);
+            if (absOutput !== absInput) {
+              generatedFiles.add(absOutput);
+            }
+          }
           spinner.succeed(chalk.green(`[新規追加] ${file}`));
           printFileResult(result, file);
         } else {
@@ -958,15 +978,16 @@ async function main(): Promise<void> {
     const watcher = chokidar.watch(cwd, {
       ignored: (filePath) => {
         const absPath = path.resolve(filePath);
-        if (absPath.includes(`${path.sep}node_modules${path.sep}`) || absPath.includes(`${path.sep}.git${path.sep}`)) {
+        const parts = absPath.split(path.sep);
+        if (parts.includes('node_modules') || parts.includes('.git')) {
           return true;
         }
-        if (absPath.startsWith(outputDir)) {
+        if (outputDir !== cwd && (absPath === outputDir || absPath.startsWith(outputDir + path.sep))) {
           return true;
         }
         for (const dir of ignoreDirs) {
           const ignoreAbs = path.resolve(cwd, dir);
-          if (absPath.startsWith(ignoreAbs)) {
+          if (absPath === ignoreAbs || absPath.startsWith(ignoreAbs + path.sep)) {
             return true;
           }
         }
@@ -991,6 +1012,11 @@ async function main(): Promise<void> {
     const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
 
     watcher.on('add', (filePath) => {
+      const absPath = path.resolve(filePath);
+      if (generatedFiles.has(absPath)) {
+        generatedFiles.delete(absPath);
+        return;
+      }
       const ext = path.extname(filePath).toLowerCase();
       if (allowedExtensions.includes(ext)) {
         const relativePath = path.relative(cwd, filePath);
