@@ -179,22 +179,22 @@ export function deletePreset(nameOrIndex: string): string | undefined {
   return undefined;
 }
 
-/** プリセット一覧をコンソールに表示する */
-export function listPresets(): void {
+/** プリセット一覧をコンソールに表示する。成功時は true、失敗時は false を返す */
+export function listPresets(): boolean {
   let presets: Record<string, StoredOptions>;
   try {
     presets = readPresetFile();
   } catch (err: any) {
     console.error(chalk.red(`エラー: プリセットファイルの読み込みに失敗しました: ${err.message}`));
     console.error(chalk.yellow(`  既存のファイル (${getPresetFilePath()}) を確認・修正してください。`));
-    return;
+    return false;
   }
   const entries = Object.entries(presets);
 
   if (entries.length === 0) {
     console.log(chalk.yellow('プリセットがありません。'));
     console.log(chalk.gray('  imsq preset save <name>  で保存できます。'));
-    return;
+    return true;
   }
 
   console.log(chalk.bold('プリセット一覧:'));
@@ -208,6 +208,7 @@ export function listPresets(): void {
   }
 
   console.log(chalk.gray('-'.repeat(44)));
+  return true;
 }
 
 function printPresetOptions(opts: StoredOptions): void {

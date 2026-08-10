@@ -47,8 +47,11 @@ program
 
     if (!first) {
       // imsq preset → 一覧表示
-      listPresets();
-      process.exit(0);
+      if (listPresets()) {
+        process.exit(0);
+      } else {
+        process.exit(1);
+      }
     }
 
     if (first === 'save') {
