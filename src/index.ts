@@ -811,8 +811,10 @@ async function main(): Promise<void> {
   }
 
   outputDir = resolveOutputDir(cwd, options.directory);
-  const outputDirLabel = displayOutputDir(cwd, outputDir, options.directory);
-  console.log(chalk.blue(`\n出力先ディレクトリ: ${outputDirLabel}/\n`));
+  if (!isPipe) {
+    const outputDirLabel = displayOutputDir(cwd, outputDir, options.directory);
+    console.log(chalk.blue(`\n出力先ディレクトリ: ${outputDirLabel}/\n`));
+  }
   const { ora, optimizeImage } = await loadProcessingDeps();
 
   let successCount = 0;
@@ -1170,10 +1172,14 @@ async function main(): Promise<void> {
 
     const copyOnly = onlyRenameRequested(fileOptions);
 
+    const fileOutputDir = fileOptions.directory !== undefined
+      ? resolveOutputDir(cwd, fileOptions.directory)
+      : outputDir;
+
     const displayIndex = `[${i + 1}/${targetFiles.length}]`;
     const spinner = ora(`${displayIndex} ${file} を処理中...`).start();
 
-    const result = await optimizeImage(file, outputDir, {
+    const result = await optimizeImage(file, fileOutputDir, {
       format,
       size: targetSize,
       widthSpec,
