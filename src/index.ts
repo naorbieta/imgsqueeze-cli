@@ -344,8 +344,7 @@ function printSelectedFilesSummary(fileNames: string[]): void {
 }
 
 function readStoredOptions(raw = false): StoredOptions {
-  const userConfig = readUserConfig();
-  const defaultPoll = userConfig.watch?.poll ?? userConfig.poll;
+  const defaultPoll = getConfiguredPoll();
 
   try {
     const fileRaw = fs.readFileSync(getStateFilePath(), 'utf8');
@@ -369,6 +368,11 @@ function readStoredOptions(raw = false): StoredOptions {
       poll: defaultPoll,
     };
   }
+}
+
+function getConfiguredPoll(): boolean | undefined {
+  const userConfig = readUserConfig();
+  return userConfig.watch?.poll ?? userConfig.poll;
 }
 
 function writeStoredOptions(options: StoredOptions): void {
@@ -592,7 +596,10 @@ function extractEffectiveOptions(): StoredOptions {
 
   return (onlyPickAndConfirm || onlyPick || onlyConfirm)
     ? mergeOptions(stored, cliProvided)
-    : cliProvided;
+    : {
+      ...cliProvided,
+      poll: cliProvided.poll ?? getConfiguredPoll(),
+    };
 }
 
 async function loadProcessingDeps(): Promise<{

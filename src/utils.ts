@@ -5,8 +5,8 @@ import fg from 'fast-glob';
 
 /**
  * CLI設定・状態ファイルの保存ディレクトリパスを返す。
- * 旧パス (~/.imsq/) が存在して新パス (~/.config/imsq/) がまだない場合は
- * 自動的にファイルを移行してから新パスを返す。
+ * 旧パス (~/.imsq/ または ~/.imsq.json) が存在する場合は
+ * 自動的に新パスへ移行してから新パスを返す。
  *
  * 優先順位:
  *  1. $XDG_CONFIG_HOME/imsq
@@ -37,7 +37,30 @@ export function getImsqDir(): string {
     }
   }
 
+  migrateLegacyStateFile(
+    path.join(os.homedir(), '.imsq.json'),
+    path.join(primaryDir, 'options.json'),
+  );
+
   return primaryDir;
+}
+
+function migrateLegacyStateFile(legacyPath: string, currentPath: string): void {
+  if (!fs.existsSync(legacyPath) || fs.existsSync(currentPath)) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+    fs.renameSync(legacyPath, currentPath);
+  } catch {
+    try {
+      fs.copyFileSync(legacyPath, currentPath);
+      fs.unlinkSync(legacyPath);
+    } catch {
+      // 移行に失敗しても、旧ファイルを残して処理を継続する。
+    }
+  }
 }
 
 function copyDirRecursive(src: string, dest: string): void {

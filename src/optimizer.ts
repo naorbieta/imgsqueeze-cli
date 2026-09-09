@@ -315,15 +315,15 @@ export async function optimizeImage(
     // 圧縮後サイズが元ファイルより大きい場合の処理
     const formatChanged = targetExt !== originalExt;
     if (finalBuffer.length > originalSize) {
-      if (!formatChanged) {
+      if (!formatChanged && !shouldResize) {
         // フォーマット変換なし: 元ファイルをそのまま使う
         finalBuffer = fs.readFileSync(absoluteInputPath);
         const msg = '圧縮後サイズが元より大きいため元ファイルを使用しました';
         warning = warning ? `${warning} / ${msg}` : msg;
       } else {
-        // フォーマット変換あり: 変換は維持するが警告
+        // 明示的なリサイズまたはフォーマット変換は維持するが警告
         const increase = finalBuffer.length - originalSize;
-        const msg = `変換後サイズが元より大きくなりました (+${increase}B)`;
+        const msg = `${shouldResize && !formatChanged ? 'リサイズ後' : '変換後'}サイズが元より大きくなりました (+${increase}B)`;
         warning = warning ? `${warning} / ${msg}` : msg;
       }
     }
