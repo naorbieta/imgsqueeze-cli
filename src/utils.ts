@@ -1,6 +1,80 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import fg from 'fast-glob';
+
+/**
+ * CLI設定・状態ファイルの保存ディレクトリパスを返す。
+ * 旧パス (~/.imsq/ または ~/.imsq.json) が存在する場合は
+ * 自動的に新パスへ移行してから新パスを返す。
+ *
+ * 優先順位:
+ *  1. $XDG_CONFIG_HOME/imsq
+ *  2. ~/.config/imsq/
+ *  (旧パスのみ存在する場合は自動移行のうえ上記へ)
+ */
+export function getImsqDir(): string {
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  const primaryDir = path.join(configHome, 'imsq');
+  const legacyDir = path.join(os.homedir(), '.imsq');
+
+  const legacyExists = fs.existsSync(legacyDir);
+  const primaryExists = fs.existsSync(primaryDir);
+
+  if (legacyExists && !primaryExists) {
+    // 旧ディレクトリを新ディレクトリへ移行
+    try {
+      fs.renameSync(legacyDir, primaryDir);
+    } catch {
+      // 異なるファイルシステム間など rename が使えない場合はコピー+削除
+      try {
+        copyDirRecursive(legacyDir, primaryDir);
+        fs.rmSync(legacyDir, { recursive: true, force: true });
+      } catch {
+        // 移行に失敗してもクラッシュさせない。旧パスを引き続き使う。
+        return legacyDir;
+      }
+    }
+  }
+
+  migrateLegacyStateFile(
+    path.join(os.homedir(), '.imsq.json'),
+    path.join(primaryDir, 'options.json'),
+  );
+
+  return primaryDir;
+}
+
+function migrateLegacyStateFile(legacyPath: string, currentPath: string): void {
+  if (!fs.existsSync(legacyPath) || fs.existsSync(currentPath)) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+    fs.renameSync(legacyPath, currentPath);
+  } catch {
+    try {
+      fs.copyFileSync(legacyPath, currentPath);
+      fs.unlinkSync(legacyPath);
+    } catch {
+      // 移行に失敗しても、旧ファイルを残して処理を継続する。
+    }
+  }
+}
+
+function copyDirRecursive(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
 
 /**
  * 容量指定の文字列をバイト数値に変換する (例: 100kb -> 102400)
