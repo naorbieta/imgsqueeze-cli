@@ -8,6 +8,7 @@ import test from 'node:test';
 
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = path.join(repoDir, 'dist', 'index.js');
+const failTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'fail-trash-loader.mjs');
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
   'base64',
@@ -25,9 +26,9 @@ function makeEnv(configHome) {
   };
 }
 
-function runCli({ cwd, args, input = '', env = makeEnv(cwd), timeout = 10000 }) {
+function runCli({ cwd, args, input = '', env = makeEnv(cwd), timeout = 10000, nodeArgs = [] }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
+    const child = spawn(process.execPath, [...nodeArgs, cliPath, ...args], {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -89,6 +90,33 @@ function writePng(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, png);
 }
+
+test('same-path output keeps a hidden backup when trash fails or does nothing', async () => {
+  for (const trashMode of ['throw', 'noop']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    writePng(inputPath);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['-d', '.'],
+        input: 'input.png\n',
+        env: { ...makeEnv(root), ...(trashMode === 'noop' ? { IMSQ_TEST_TRASH_NOOP: '1' } : {}) },
+        nodeArgs: ['--loader', failTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      const backupNames = fs.readdirSync(root).filter((name) => name.startsWith('.imsq-backup-'));
+
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.existsSync(inputPath), true);
+      assert.equal(backupNames.length, 1);
+      assert.deepEqual(fs.readFileSync(path.join(root, backupNames[0])), png);
+      assert.match(output, /ゴミ箱へ移動できなかったため.*バックアップ.*\.imsq-backup-/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
 
 test('pipe recursive input outside cwd is rejected without writing outside outputDir', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
