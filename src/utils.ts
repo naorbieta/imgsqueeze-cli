@@ -134,6 +134,30 @@ export function resolveOutputDir(cwd: string, directoryOption?: string): string 
   return path.resolve(cwd, directoryOption);
 }
 
+export function shouldTrackGeneratedFile(
+  cwd: string,
+  outputDir: string,
+  outputPath: string,
+  inputPath: string,
+): boolean {
+  return path.resolve(outputDir) === path.resolve(cwd)
+    && path.resolve(cwd, outputPath) !== path.resolve(cwd, inputPath);
+}
+
+export function resolveDeletionOptions(
+  base: { hard?: boolean; trash?: boolean },
+  override: { hard?: boolean; trash?: boolean },
+): { hard: boolean; trash: boolean } {
+  return {
+    hard: override.trash === true && override.hard !== true
+      ? false
+      : override.hard ?? base.hard ?? false,
+    trash: override.hard === true && override.trash !== true
+      ? false
+      : override.trash ?? base.trash ?? false,
+  };
+}
+
 /**
  * 指定ディレクトリ直下で重複しない出力先フォルダ名 (例: optimized, optimized_1) を判定してフルパスを返す
  */

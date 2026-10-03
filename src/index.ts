@@ -5,7 +5,15 @@ import path from 'node:path';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { checkbox, input } from '@inquirer/prompts';
-import { scanImages, parseSize, formatSize, resolveOutputDir, getImsqDir } from './utils.js';
+import {
+  scanImages,
+  parseSize,
+  formatSize,
+  resolveOutputDir,
+  getImsqDir,
+  shouldTrackGeneratedFile,
+  resolveDeletionOptions,
+} from './utils.js';
 import { getPreset, savePreset, deletePreset, listPresets } from './preset.js';
 import { readUserConfig } from './config.js';
 
@@ -29,6 +37,7 @@ type StoredOptions = {
 type EffectiveOptions = StoredOptions;
 
 const program = new Command();
+const allowedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 
 function getStateFilePath(): string {
   return path.join(getImsqDir(), 'options.json');
@@ -60,7 +69,7 @@ program
         console.error(chalk.red('エラー: プリセット名を指定してください。例: imsq preset save mypreset'));
         process.exit(1);
       }
-      
+
       const optionTokens = args.slice(2);
       let stored: StoredOptions;
       if (optionTokens.length > 0) {
@@ -428,6 +437,8 @@ function normalizeOptions(raw: Record<string, unknown>): StoredOptions {
 }
 
 function mergeOptions(base: StoredOptions, override: StoredOptions): StoredOptions {
+  const { hard, trash } = resolveDeletionOptions(base, override);
+
   return {
     format: override.format !== undefined ? override.format : base.format,
     size: override.size !== undefined ? override.size : base.size,
@@ -438,12 +449,26 @@ function mergeOptions(base: StoredOptions, override: StoredOptions): StoredOptio
     pick: override.pick ?? base.pick ?? false,
     directory: override.directory !== undefined ? override.directory : base.directory,
     confirm: override.confirm ?? base.confirm ?? false,
-    hard: override.hard ?? base.hard ?? false,
-    trash: override.trash ?? base.trash ?? false,
+    hard,
+    trash,
     watch: override.watch ?? base.watch ?? false,
     initial: override.initial ?? base.initial ?? true,
     poll: override.poll ?? base.poll ?? false,
   };
+}
+
+function getUnsupportedFormatError(format?: string): string | undefined {
+  if (!format || allowedFormats.includes(format.toLowerCase())) {
+    return undefined;
+  }
+  return `サポートされていないフォーマットです: ${format}`;
+}
+
+function isOutsideCwd(cwd: string, inputPath: string): boolean {
+  const relative = path.relative(cwd, path.resolve(cwd, inputPath));
+  return relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative);
 }
 
 function applyPromptOverrides(base: StoredOptions, override: StoredOptions): StoredOptions {
@@ -452,6 +477,8 @@ function applyPromptOverrides(base: StoredOptions, override: StoredOptions): Sto
   for (const key of Object.keys(override) as Array<keyof StoredOptions>) {
     (next as Record<keyof StoredOptions, StoredOptions[keyof StoredOptions]>)[key] = override[key];
   }
+
+  Object.assign(next, resolveDeletionOptions(base, override));
 
   return next;
 }
@@ -770,7 +797,10 @@ async function main(): Promise<void> {
     console.log(chalk.cyan(`プリセット "${found.presetName}" を読み込みました。`));
     // CLIで明示指定されたオプションをプリセットより優先してマージ
     const cliExplicit = normalizeOptions(program.opts());
-    options = mergeOptions(found.options, cliExplicit);
+    options = mergeOptions(
+      { ...found.options, poll: found.options.poll ?? options.poll },
+      cliExplicit,
+    );
   }
 
   const cwd = process.cwd();
@@ -797,6 +827,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (options.watch) {
+    const formatError = getUnsupportedFormatError(options.format);
+    if (formatError) {
+      console.error(chalk.red(`エラー: ${formatError}`));
+      process.exit(1);
+    }
+  }
+
   if (options.confirm && !options.pick) {
     const confirmed = await promptForConfirmation(options);
     if (confirmed === null) {
@@ -808,9 +846,15 @@ async function main(): Promise<void> {
 
   let outputDir = resolveOutputDir(cwd, options.directory);
   const ignoreDirs = collectOptimizedDirs(cwd);
-  const outputDirName = path.basename(outputDir);
-  if (path.dirname(outputDir) === cwd && !ignoreDirs.includes(outputDirName)) {
-    ignoreDirs.push(outputDirName);
+  const relativeOutputDir = path.relative(cwd, outputDir);
+  if (
+    relativeOutputDir
+    && relativeOutputDir !== '..'
+    && !relativeOutputDir.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relativeOutputDir)
+    && !ignoreDirs.includes(relativeOutputDir)
+  ) {
+    ignoreDirs.push(relativeOutputDir);
   }
 
   if (!hadConfirmPrompt && !isPipe) {
@@ -830,7 +874,7 @@ async function main(): Promise<void> {
   let totalOutputSize = 0;
 
   if (options.watch) {
-    let watchSuccessCount = 0;
+    let watchAssignedCount = 0;
 
     // 1. 起動時処理 (options.initial !== false の場合のみ)
     if (options.initial !== false) {
@@ -867,7 +911,7 @@ async function main(): Promise<void> {
             stretchMode,
             keepMetadata: !!options.keep,
             namePattern: options.name,
-            fileIndex: i + 1,
+            fileIndex: ++watchAssignedCount,
             recursive: !!options.recursive,
             cwd,
             copyOnly,
@@ -877,7 +921,6 @@ async function main(): Promise<void> {
 
           if (result.success) {
             successCount++;
-            watchSuccessCount++;
             totalOriginalSize += result.originalSize;
             totalOutputSize += result.outputSize || 0;
 
@@ -943,7 +986,7 @@ async function main(): Promise<void> {
 
       while (queue.length > 0) {
         const file = queue.shift()!;
-        watchSuccessCount++;
+        const fileIndex = ++watchAssignedCount;
         const spinner = ora(`${file} を処理中...`).start();
 
         const result = await optimizeImage(file, outputDir, {
@@ -954,7 +997,7 @@ async function main(): Promise<void> {
           stretchMode: stretchModeWatch,
           keepMetadata: !!options.keep,
           namePattern: options.name,
-          fileIndex: watchSuccessCount,
+          fileIndex,
           recursive: !!options.recursive,
           cwd,
           copyOnly: copyOnlyWatch,
@@ -965,8 +1008,7 @@ async function main(): Promise<void> {
         if (result.success) {
           if (result.outputPath) {
             const absOutput = path.resolve(cwd, result.outputPath);
-            const absInput = path.resolve(cwd, file);
-            if (absOutput !== absInput) {
+            if (shouldTrackGeneratedFile(cwd, outputDir, result.outputPath, file)) {
               generatedFiles.add(absOutput);
             }
           }
@@ -1029,7 +1071,7 @@ async function main(): Promise<void> {
 
     const watcher = chokidar.watch(cwd, watchOptions);
 
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    const allowedExtensions = allowedFormats.map((format) => `.${format}`);
 
     watcher.on('add', (filePath) => {
       const absPath = path.resolve(filePath);
@@ -1078,6 +1120,16 @@ async function main(): Promise<void> {
       if (tokens.length > 1) {
         try {
           const overrideOptions = parseOptionTokens(tokens.slice(1));
+          const unsupportedLineOptions = [
+            overrideOptions.pick ? '-p, --pick' : undefined,
+            overrideOptions.confirm ? '-c, --confirm' : undefined,
+          ].filter((value): value is string => value !== undefined);
+          if (unsupportedLineOptions.length > 0) {
+            console.error(chalk.red(
+              `行のオプションエラー ("${trimmed}"): ${unsupportedLineOptions.join('、')} はパイプ入力の行別指定では使用できません。`,
+            ));
+            continue;
+          }
           fileOptions = mergeOptions(options, overrideOptions);
         } catch (err: any) {
           console.error(chalk.red(`行のパースエラー ("${trimmed}"): ${err.message}`));
@@ -1132,10 +1184,14 @@ async function main(): Promise<void> {
     }
   }
 
-  const allowedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-
   for (let i = 0; i < targetFiles.length; i++) {
     const { file, fileOptions } = targetFiles[i];
+
+    if (fileOptions.recursive && isOutsideCwd(cwd, file)) {
+      failureCount++;
+      console.error(chalk.red(`エラー: ${file} - 再帰処理ではカレントディレクトリ外の入力を指定できません。スキップします。`));
+      continue;
+    }
 
     if (fileOptions.hard && fileOptions.trash) {
       failureCount++;
@@ -1144,9 +1200,10 @@ async function main(): Promise<void> {
     }
 
     const format = fileOptions.format?.toLowerCase();
-    if (format && !allowedFormats.includes(format)) {
+    const formatError = getUnsupportedFormatError(fileOptions.format);
+    if (formatError) {
       failureCount++;
-      console.error(chalk.red(`エラー: ${file} - サポートされていないフォーマットです: ${fileOptions.format}`));
+      console.error(chalk.red(`エラー: ${file} - ${formatError}`));
       continue;
     }
 

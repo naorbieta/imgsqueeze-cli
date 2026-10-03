@@ -4,7 +4,6 @@ import chalk from 'chalk';
 import * as TOML from 'smol-toml';
 import { getImsqDir } from './utils.js';
 
-
 export type StoredOptions = {
   format?: string;
   size?: string;
@@ -104,7 +103,7 @@ export function getPreset(name: string): { presetName: string; options: StoredOp
   }
 
   // 番号指定の場合（1-indexed）
-  const index = Number.parseInt(name, 10);
+  const index = /^\d+$/.test(name) ? Number(name) : Number.NaN;
   if (!Number.isNaN(index) && index > 0) {
     const entries = Object.entries(presets);
     const entry = entries[index - 1];
@@ -163,7 +162,7 @@ export function deletePreset(nameOrIndex: string): string | undefined {
   }
 
   // 番号指定の場合
-  const index = Number.parseInt(nameOrIndex, 10);
+  const index = /^\d+$/.test(nameOrIndex) ? Number(nameOrIndex) : Number.NaN;
   if (!Number.isNaN(index) && index > 0) {
     const entries = Object.entries(presets);
     const entry = entries[index - 1];
