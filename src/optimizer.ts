@@ -78,28 +78,78 @@ function deletePath(filePath: string): void {
   fs.unlinkSync(filePath);
 }
 
+function createBackupCopy(filePath: string): string {
+  const extension = path.extname(filePath);
+  const baseName = path.basename(filePath, extension);
+  const directory = path.dirname(filePath);
+
+  while (true) {
+    const backupPath = path.join(
+      directory,
+      `.imsq-backup-${baseName}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}${extension}`
+    );
+    try {
+      fs.copyFileSync(filePath, backupPath, fs.constants.COPYFILE_EXCL);
+      return backupPath;
+    } catch (err: any) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
+function restoreFromBackup(filePath: string, backupPath: string): void {
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+  fs.renameSync(backupPath, filePath);
+}
+
 async function replaceSamePathFromTemp(
   inputPath: string,
   outputPath: string,
   tempPath: string,
   hardDelete: boolean
-): Promise<void> {
+): Promise<string | undefined> {
+  let backupPath: string | undefined;
   if (hardDelete) {
     deletePath(inputPath);
   } else {
-    await movePathToTrash(inputPath);
+    try {
+      await movePathToTrash(inputPath);
+      if (fs.existsSync(inputPath)) {
+        throw new Error('元ファイルがゴミ箱へ移動されませんでした');
+      }
+    } catch {
+      backupPath = createBackupCopy(inputPath);
+      try {
+        deletePath(inputPath);
+      } catch (err) {
+        try {
+          deletePath(backupPath);
+        } catch {
+          // 退避ファイルを残して元画像を保護する
+        }
+        throw err;
+      }
+    }
   }
 
   try {
     fs.copyFileSync(tempPath, outputPath);
   } catch (err) {
     try {
-      fs.copyFileSync(tempPath, inputPath);
+      if (backupPath) {
+        restoreFromBackup(inputPath, backupPath);
+      } else {
+        fs.copyFileSync(tempPath, inputPath);
+      }
     } catch {
       // 復旧失敗時は元のエラーを優先する
     }
     throw err;
   }
+
+  return backupPath;
 }
 
 /**
@@ -200,12 +250,16 @@ export async function optimizeImage(
         fs.copyFileSync(absoluteInputPath, tempOutputPath);
 
         if (samePath) {
-          await replaceSamePathFromTemp(
+          const backupPath = await replaceSamePathFromTemp(
             absoluteInputPath,
             absoluteOutputPath,
             tempOutputPath,
             !!options.hardDelete
           );
+          if (backupPath) {
+            const backupWarning = `元ファイルをゴミ箱へ移動できなかったため、バックアップを保存しました: ${backupPath}`;
+            warning = warning ? `${warning} / ${backupWarning}` : backupWarning;
+          }
         } else {
           fs.copyFileSync(tempOutputPath, absoluteOutputPath);
           if (options.hardDelete) {
@@ -333,12 +387,16 @@ export async function optimizeImage(
       fs.writeFileSync(tempOutputPath, finalBuffer);
 
       if (samePath) {
-        await replaceSamePathFromTemp(
+        const backupPath = await replaceSamePathFromTemp(
           absoluteInputPath,
           absoluteOutputPath,
           tempOutputPath,
           !!options.hardDelete
         );
+        if (backupPath) {
+          const backupWarning = `元ファイルをゴミ箱へ移動できなかったため、バックアップを保存しました: ${backupPath}`;
+          warning = warning ? `${warning} / ${backupWarning}` : backupWarning;
+        }
       } else {
         fs.copyFileSync(tempOutputPath, absoluteOutputPath);
         if (options.hardDelete) {
