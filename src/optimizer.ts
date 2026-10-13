@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
-import trash from 'trash';
 import type { Sharp, ResizeOptions } from 'sharp';
+import { movePathToTrash } from './trash.js';
 
 export interface OptimizeResult {
   success: boolean;
@@ -68,10 +68,6 @@ function applyNamePattern(pattern: string, originalBaseName: string, index: numb
 function createTempOutputPath(targetPath: string): string {
   const tempName = `.imsq-tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return path.join(path.dirname(targetPath), tempName);
-}
-
-async function movePathToTrash(filePath: string): Promise<void> {
-  await trash([filePath]);
 }
 
 function deletePath(filePath: string): void {

@@ -9,6 +9,10 @@ import test from 'node:test';
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = path.join(repoDir, 'dist', 'index.js');
 const failTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'fail-trash-loader.mjs');
+const wslTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'wsl-trash-loader.mjs');
+const wslTrashProbePath = path.join(repoDir, 'test', 'fixtures', 'wsl-trash-probe.mjs');
+const wslPowerShellPath = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
+const windowsPowerShellRoot = String.raw`C:\Windows`;
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
   'base64',
@@ -52,6 +56,24 @@ function runCli({ cwd, args, input = '', env = makeEnv(cwd), timeout = 10000, no
       resolve({ code, signal, stdout, stderr });
     });
     child.stdin.end(input);
+  });
+}
+
+function runNodeScript({ cwd, scriptPath, env, nodeArgs = [] }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...nodeArgs, scriptPath], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code, signal) => resolve({code, signal, stdout, stderr}));
   });
 }
 
@@ -114,6 +136,91 @@ test('same-path output keeps a hidden backup when trash fails or does nothing', 
       assert.match(output, /ゴミ箱へ移動できなかったため.*バックアップ.*\.imsq-backup-/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('WSL Windows-local trash passes the WSL PowerShell path and preserves literal paths', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const env = {
+    ...makeEnv(root),
+    IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+    SYSTEMROOT: windowsPowerShellRoot,
+  };
+  try {
+    const result = await runNodeScript({
+      cwd: repoDir,
+      scriptPath: wslTrashProbePath,
+      env,
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /WSL trash boundary passed/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WSL trash handles same-path and separate-output CLI flows without a backup warning', async () => {
+  for (const outputDir of ['.', 'out']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputName = 'input.png';
+    const inputPath = path.join(root, inputName);
+    writePng(inputPath);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-d', outputDir],
+        input: `${inputName}\n`,
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /バックアップ/);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+      assert.equal(fs.existsSync(path.join(root, outputDir, inputName)), true);
+      if (outputDir === 'out') {
+        assert.equal(fs.existsSync(inputPath), false);
+      }
+    } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('WSL trash does not report success when conversion fails or PowerShell leaves the input', async () => {
+  for (const mode of ['conversion', 'noop']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    writePng(inputPath);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-d', 'out'],
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          ...(mode === 'conversion' ? {IMSQ_TEST_WSL_CONVERSION_FAILURE: '1'} : {IMSQ_TEST_WSL_NOOP: '1'}),
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 0/);
+      assert.equal(fs.existsSync(inputPath), true);
+    } finally {
+    fs.rmSync(root, { recursive: true, force: true });
     }
   }
 });
