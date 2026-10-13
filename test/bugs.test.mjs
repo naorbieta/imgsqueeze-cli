@@ -114,7 +114,24 @@ function writePng(filePath) {
 }
 
 test('same-path output keeps a hidden backup when trash fails or does nothing', async () => {
-  for (const trashMode of ['throw', 'noop']) {
+  const trashCases = [
+    {
+      env: { IMSQ_TEST_TRASH_STDERR: 'PowerShell: Access is denied' },
+      reason: 'PowerShell: Access is denied',
+    },
+    {
+      env: {
+        IMSQ_TEST_TRASH_MESSAGE: 'PowerShell failed: C:\\Windows\\System32\\powershell.exe -EncodedCommand VERY_LONG_ENCODED_COMMAND',
+      },
+      reason: 'PowerShell failed: C:\\Windows\\System32\\powershell.exe -EncodedCommand (省略)',
+      hidden: 'VERY_LONG_ENCODED_COMMAND',
+    },
+    {
+      env: { IMSQ_TEST_TRASH_NOOP: '1' },
+      reason: '元ファイルがゴミ箱へ移動されませんでした',
+    },
+  ];
+  for (const trashCase of trashCases) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
     const inputPath = path.join(root, 'input.png');
     writePng(inputPath);
@@ -123,7 +140,7 @@ test('same-path output keeps a hidden backup when trash fails or does nothing', 
         cwd: root,
         args: ['-d', '.'],
         input: 'input.png\n',
-        env: { ...makeEnv(root), ...(trashMode === 'noop' ? { IMSQ_TEST_TRASH_NOOP: '1' } : {}) },
+        env: { ...makeEnv(root), ...trashCase.env },
         nodeArgs: ['--loader', failTrashLoaderPath],
       });
       const output = `${result.stdout}\n${result.stderr}`;
@@ -134,6 +151,9 @@ test('same-path output keeps a hidden backup when trash fails or does nothing', 
       assert.equal(backupNames.length, 1);
       assert.deepEqual(fs.readFileSync(path.join(root, backupNames[0])), png);
       assert.match(output, /ゴミ箱へ移動できなかったため.*バックアップ.*\.imsq-backup-/);
+      const flattenedOutput = output.replace(/\s+/gu, ' ');
+      assert.ok(flattenedOutput.includes(trashCase.reason), flattenedOutput);
+      if (trashCase.hidden) assert.doesNotMatch(output, new RegExp(trashCase.hidden));
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
