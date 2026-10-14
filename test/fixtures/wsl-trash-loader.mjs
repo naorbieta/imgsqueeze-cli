@@ -33,6 +33,10 @@ execFile[promisify.custom] = async (file, args) => {
   if (!command.includes(String.raw\`C:\\\\Users\\\\nao\\\\画像 [a]''b.png\`)) {
     throw new Error('WSL trash command changed the literal path');
   }
+  if (process.env.IMSQ_TEST_WSL_REJECT_AFTER_DELETE === '1') {
+    fs.renameSync(process.env.IMSQ_TEST_WSL_SOURCE_PATH, process.env.IMSQ_TEST_WSL_BIN_PATH);
+    throw new Error('simulated PowerShell failure after moving the original to the Recycle Bin');
+  }
   if (process.env.IMSQ_TEST_WSL_SOURCE_PATH && process.env.IMSQ_TEST_WSL_NOOP !== '1') {
     fs.unlinkSync(process.env.IMSQ_TEST_WSL_SOURCE_PATH);
   }

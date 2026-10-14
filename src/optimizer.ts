@@ -93,6 +93,15 @@ function createBackupCopy(filePath: string): string {
   }
 }
 
+function isMissingPath(filePath: string): boolean {
+  try {
+    fs.statSync(filePath);
+    return false;
+  } catch (error: any) {
+    return error.code === 'ENOENT';
+  }
+}
+
 function restoreFromBackup(filePath: string, backupPath: string): void {
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
@@ -134,21 +143,33 @@ async function replaceSamePathFromTemp(
   } else {
     try {
       await movePathToTrash(inputPath);
-      if (fs.existsSync(inputPath)) {
+      if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
         throw new Error('元ファイルがゴミ箱へ移動されませんでした');
       }
     } catch (error) {
       trashError = error;
-      backupPath = createBackupCopy(inputPath);
-      try {
-        deletePath(inputPath);
-      } catch (err) {
+      if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
         try {
-          deletePath(backupPath);
-        } catch {
-          // 退避ファイルを残して元画像を保護する
+          backupPath = createBackupCopy(inputPath);
+        } catch (error: any) {
+          if (error.code !== 'ENOENT' || !isMissingPath(inputPath)) {
+            throw error;
+          }
         }
-        throw err;
+        if (backupPath) {
+          try {
+            deletePath(inputPath);
+          } catch (err: any) {
+            if (err.code !== 'ENOENT') {
+              try {
+                deletePath(backupPath);
+              } catch {
+                // 退避ファイルを残して元画像を保護する
+              }
+              throw err;
+            }
+          }
+        }
       }
     }
   }

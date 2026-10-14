@@ -11,10 +11,15 @@ const cliPath = path.join(repoDir, 'dist', 'index.js');
 const failTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'fail-trash-loader.mjs');
 const wslTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'wsl-trash-loader.mjs');
 const wslTrashProbePath = path.join(repoDir, 'test', 'fixtures', 'wsl-trash-probe.mjs');
+const wslExistsRacePreloadPath = path.join(repoDir, 'test', 'fixtures', 'wsl-exists-race-preload.mjs');
 const wslPowerShellPath = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
 const windowsPowerShellRoot = String.raw`C:\Windows`;
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
+const resizePng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAYAAAD5PA/NAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAD0lEQVQImWP4z8DwHxkDAEPNB/nd70idAAAAAElFTkSuQmCC',
   'base64',
 );
 
@@ -212,6 +217,46 @@ test('WSL trash handles same-path and separate-output CLI flows without a backup
       }
     } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('WSL trash keeps same-path output when the original reaches the bin before PowerShell rejects', async () => {
+  for (const staleExists of [false, true]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-l', 'w:2', '-d', '.'],
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_REJECT_AFTER_DELETE: '1',
+        },
+        nodeArgs: staleExists
+          ? ['--import', wslExistsRacePreloadPath, '--loader', wslTrashLoaderPath]
+          : ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /ゴミ箱へ移動できなかったため/);
+      assert.equal(fs.existsSync(inputPath), true);
+      assert.equal(fs.existsSync(path.join(root, 'simulated-recycle-bin', 'input.png')), true);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+      assert.equal(fs.readFileSync(binPath).readUInt32BE(16), 4);
+      assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   }
 });
