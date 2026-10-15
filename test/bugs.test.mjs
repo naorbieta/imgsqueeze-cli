@@ -261,6 +261,86 @@ test('WSL trash keeps same-path output when the original reaches the bin before 
   }
 });
 
+test('same-path output survives a WSL boundary that removes its temp file', async () => {
+  const cases = [
+    { args: ['--trash', '-l', 'w:2', '-d', '.'], outputPath: 'input.png', outputWidth: 2, inputRemains: true },
+    { args: ['--trash', '-n', '?', '-d', '.'], outputPath: 'input.png', outputWidth: 4, inputRemains: true },
+  ];
+  for (const testCase of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: testCase.args,
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_DELETE_TEMP: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /画像処理エラー|バックアップ/);
+      const outputPath = path.join(root, testCase.outputPath);
+      assert.equal(fs.existsSync(outputPath), true);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), testCase.outputWidth);
+      if (testCase.outputWidth === 4) {
+        assert.deepEqual(fs.readFileSync(outputPath), resizePng);
+      }
+      assert.equal(fs.existsSync(inputPath), testCase.inputRemains);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-tmp-')), false);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('separate compressed output writes the final buffer before trash', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const inputPath = path.join(root, 'input.png');
+  const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+  fs.writeFileSync(inputPath, resizePng);
+  fs.mkdirSync(path.dirname(binPath), { recursive: true });
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: ['--trash', '-l', 'w:2', '-d', 'out'],
+      input: 'input.png\n',
+      env: {
+        ...makeEnv(root),
+        IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+        SYSTEMROOT: windowsPowerShellRoot,
+        IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        IMSQ_TEST_WSL_BIN_PATH: binPath,
+        IMSQ_TEST_WSL_DELETE_TEMP: '1',
+      },
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 1/);
+    assert.doesNotMatch(output, /画像処理エラー|バックアップ/);
+    const outputPath = path.join(root, 'out', 'input.png');
+    assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 2);
+    assert.equal(fs.existsSync(inputPath), false);
+    assert.deepEqual(fs.readFileSync(binPath), resizePng);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('WSL trash does not report success when conversion fails or PowerShell leaves the input', async () => {
   for (const mode of ['conversion', 'noop']) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
