@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import sharp from 'sharp';
 
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = path.join(repoDir, 'dist', 'index.js');
@@ -20,6 +21,10 @@ const png = Buffer.from(
 );
 const resizePng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAYAAAD5PA/NAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAD0lEQVQImWP4z8DwHxkDAEPNB/nd70idAAAAAElFTkSuQmCC',
+  'base64',
+);
+const jpeg = Buffer.from(
+  '/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABkAMgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAYH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AnwGlIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//2Q==',
   'base64',
 );
 
@@ -117,6 +122,15 @@ function writePng(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, png);
 }
+
+function writeJpeg(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, jpeg);
+}
+
+const canInspectOpenFiles = process.platform === 'darwin'
+  ? fs.existsSync('/usr/sbin/lsof')
+  : process.platform === 'linux' && fs.existsSync('/proc/self/fd');
 
 test('same-path output keeps a hidden backup when trash fails or does nothing', async () => {
   const trashCases = [
@@ -255,6 +269,49 @@ test('WSL trash keeps same-path output when the original reaches the bin before 
       assert.equal(fs.readFileSync(binPath).readUInt32BE(16), 4);
       assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
       assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('JPEG same-path trash has no Sharp input handle at the Windows boundary', { skip: !canInspectOpenFiles }, async () => {
+  const cases = [
+    { args: ['--trash', '-l', 'w:2', '-d', '.'], outputWidth: 2 },
+    { args: ['--trash', '-d', '.'], outputWidth: 200 },
+  ];
+  for (const testCase of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.jpg');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.jpg');
+    writeJpeg(inputPath);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: testCase.args,
+        input: 'input.jpg\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_DELETE_TEMP: '1',
+          IMSQ_TEST_FAIL_IF_SOURCE_OPEN: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /画像処理エラー|バックアップ/);
+      assert.equal(fs.existsSync(inputPath), true);
+      assert.equal(fs.existsSync(binPath), true);
+      assert.equal(fs.readdirSync(root).some(name => name.startsWith('.imsq-backup-')), false);
+      const metadata = await sharp(inputPath).metadata();
+      assert.equal(metadata.width, testCase.outputWidth);
+      assert.deepEqual(fs.readFileSync(binPath), jpeg);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

@@ -17,6 +17,26 @@ import {Buffer} from 'node:buffer';
 import {promisify} from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
+import {execFileSync as inspectOpenFiles} from 'node:child_process';
+
+function sourcePathIsOpen(filePath) {
+  if (process.platform === 'darwin') {
+    const output = inspectOpenFiles('/usr/sbin/lsof', ['-p', String(process.pid), '-Fn'], {encoding: 'utf8'});
+    const realPath = fs.realpathSync(filePath);
+    return output.split('\\n').some(line => line === 'n' + realPath);
+  }
+  if (process.platform === 'linux') {
+    const realPath = fs.realpathSync(filePath);
+    return fs.readdirSync('/proc/self/fd').some(fd => {
+      try {
+        return fs.realpathSync('/proc/self/fd/' + fd) === realPath;
+      } catch {
+        return false;
+      }
+    });
+  }
+  return false;
+}
 
 const execFile = () => {
   throw new Error('execFile callback should be wrapped by promisify');
@@ -33,6 +53,11 @@ execFile[promisify.custom] = async (file, args) => {
   }
   if (!command.includes(String.raw\`C:\\\\Users\\\\nao\\\\画像 [a]''b.png\`)) {
     throw new Error('WSL trash command changed the literal path');
+  }
+  if (process.env.IMSQ_TEST_FAIL_IF_SOURCE_OPEN === '1'
+    && process.env.IMSQ_TEST_WSL_SOURCE_PATH
+    && sourcePathIsOpen(process.env.IMSQ_TEST_WSL_SOURCE_PATH)) {
+    throw new Error('input source remains open at the Windows trash boundary');
   }
   if (process.env.IMSQ_TEST_WSL_DELETE_TEMP === '1') {
     fs.renameSync(process.env.IMSQ_TEST_WSL_SOURCE_PATH, process.env.IMSQ_TEST_WSL_BIN_PATH);

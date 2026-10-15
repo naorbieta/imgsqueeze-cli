@@ -312,7 +312,9 @@ export async function optimizeImage(
       };
     }
 
-    let sharpInstance = sharp(absoluteInputPath, isAnimated ? { animated: true } : {});
+    // Sharpのパス入力はlibvipsのcacheが元ファイルを保持し、Windowsのtrash移動と同名再作成を妨げるため先に読み切る
+    const inputBuffer = fs.readFileSync(absoluteInputPath);
+    let sharpInstance = sharp(inputBuffer, isAnimated ? { animated: true } : {});
 
     // メタデータ取得 (パーセント指定のリサイズに必要)
     const metadata = await sharpInstance.metadata();
@@ -399,7 +401,7 @@ export async function optimizeImage(
     if (finalBuffer.length > originalSize) {
       if (!formatChanged && !shouldResize) {
         // フォーマット変換なし: 元ファイルをそのまま使う
-        finalBuffer = fs.readFileSync(absoluteInputPath);
+        finalBuffer = inputBuffer;
         const msg = '圧縮後サイズが元より大きいため元ファイルを使用しました';
         warning = warning ? `${warning} / ${msg}` : msg;
       } else {
