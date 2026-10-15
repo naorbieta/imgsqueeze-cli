@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
-import trash from 'trash';
 import type { Sharp, ResizeOptions } from 'sharp';
+import { movePathToTrash } from './trash.js';
 
 export interface OptimizeResult {
   success: boolean;
@@ -65,41 +65,126 @@ function applyNamePattern(pattern: string, originalBaseName: string, index: numb
   return result + ext;
 }
 
-function createTempOutputPath(targetPath: string): string {
-  const tempName = `.imsq-tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return path.join(path.dirname(targetPath), tempName);
-}
-
-async function movePathToTrash(filePath: string): Promise<void> {
-  await trash([filePath]);
-}
-
 function deletePath(filePath: string): void {
   fs.unlinkSync(filePath);
 }
 
-async function replaceSamePathFromTemp(
+function createBackupCopy(filePath: string): string {
+  const extension = path.extname(filePath);
+  const baseName = path.basename(filePath, extension);
+  const directory = path.dirname(filePath);
+
+  while (true) {
+    const backupPath = path.join(
+      directory,
+      `.imsq-backup-${baseName}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}${extension}`
+    );
+    try {
+      fs.copyFileSync(filePath, backupPath, fs.constants.COPYFILE_EXCL);
+      return backupPath;
+    } catch (err: any) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
+function isMissingPath(filePath: string): boolean {
+  try {
+    fs.statSync(filePath);
+    return false;
+  } catch (error: any) {
+    return error.code === 'ENOENT';
+  }
+}
+
+function restoreFromBackup(filePath: string, backupPath: string): void {
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+  fs.renameSync(backupPath, filePath);
+}
+
+function formatTrashFailure(error: unknown): string {
+  const details = error && typeof error === 'object'
+    ? error as { stderr?: unknown; code?: unknown; path?: unknown }
+    : {};
+  if (typeof details.stderr === 'string' && details.stderr.trim()) {
+    return details.stderr.trim();
+  }
+
+  let message = error instanceof Error ? error.message : String(error ?? '');
+  message = message.replace(/\s+-EncodedCommand(?:\s+\S+)?/u, ' -EncodedCommand (省略)');
+  const suffix = [
+    typeof details.code === 'string' && !message.includes(details.code) ? `code: ${details.code}` : undefined,
+    typeof details.path === 'string' && !message.includes(details.path) ? `path: ${details.path}` : undefined,
+  ].filter((value): value is string => value !== undefined);
+  return [...(message ? [message] : []), ...suffix].join(' / ') || '原因不明のエラー';
+}
+
+function createBackupWarning(backupPath: string, trashError: unknown): string {
+  return `元ファイルをゴミ箱へ移動できなかったため、バックアップを保存しました: ${backupPath}（原因: ${formatTrashFailure(trashError)}）`;
+}
+
+async function replaceSamePathFromBuffer(
   inputPath: string,
   outputPath: string,
-  tempPath: string,
+  outputBuffer: Buffer,
   hardDelete: boolean
-): Promise<void> {
+): Promise<{ backupPath?: string; trashError?: unknown }> {
+  let backupPath: string | undefined;
+  let trashError: unknown;
   if (hardDelete) {
     deletePath(inputPath);
   } else {
-    await movePathToTrash(inputPath);
+    try {
+      await movePathToTrash(inputPath);
+      if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
+        throw new Error('元ファイルがゴミ箱へ移動されませんでした');
+      }
+    } catch (error) {
+      trashError = error;
+      if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
+        try {
+          backupPath = createBackupCopy(inputPath);
+        } catch (error: any) {
+          if (error.code !== 'ENOENT' || !isMissingPath(inputPath)) {
+            throw error;
+          }
+        }
+        if (backupPath) {
+          try {
+            deletePath(inputPath);
+          } catch (err: any) {
+            if (err.code !== 'ENOENT') {
+              try {
+                deletePath(backupPath);
+              } catch {
+                // 退避ファイルを残して元画像を保護する
+              }
+              throw err;
+            }
+          }
+        }
+      }
+    }
   }
 
   try {
-    fs.copyFileSync(tempPath, outputPath);
+    fs.writeFileSync(outputPath, outputBuffer);
   } catch (err) {
     try {
-      fs.copyFileSync(tempPath, inputPath);
+      if (backupPath) {
+        restoreFromBackup(inputPath, backupPath);
+      } else {
+        fs.writeFileSync(inputPath, outputBuffer);
+      }
     } catch {
       // 復旧失敗時は元のエラーを優先する
     }
     throw err;
   }
+
+  return { backupPath, trashError };
 }
 
 /**
@@ -195,28 +280,25 @@ export async function optimizeImage(
     }
 
     if (options.copyOnly) {
-      const tempOutputPath = createTempOutputPath(absoluteOutputPath);
-      try {
-        fs.copyFileSync(absoluteInputPath, tempOutputPath);
-
-        if (samePath) {
-          await replaceSamePathFromTemp(
-            absoluteInputPath,
-            absoluteOutputPath,
-            tempOutputPath,
-            !!options.hardDelete
-          );
-        } else {
-          fs.copyFileSync(tempOutputPath, absoluteOutputPath);
-          if (options.hardDelete) {
-            deletePath(absoluteInputPath);
-          } else if (options.trashOriginal) {
-            await movePathToTrash(absoluteInputPath);
-          }
+      if (samePath) {
+        const inputBuffer = fs.readFileSync(absoluteInputPath);
+        const { backupPath, trashError } = await replaceSamePathFromBuffer(
+          absoluteInputPath,
+          absoluteOutputPath,
+          inputBuffer,
+          !!options.hardDelete
+        );
+        if (backupPath) {
+          const backupWarning = createBackupWarning(backupPath, trashError);
+          warning = warning ? `${warning} / ${backupWarning}` : backupWarning;
         }
-      } finally {
-        if (fs.existsSync(tempOutputPath)) {
-          fs.unlinkSync(tempOutputPath);
+      } else {
+        const inputBuffer = fs.readFileSync(absoluteInputPath);
+        fs.writeFileSync(absoluteOutputPath, inputBuffer);
+        if (options.hardDelete) {
+          deletePath(absoluteInputPath);
+        } else if (options.trashOriginal) {
+          await movePathToTrash(absoluteInputPath);
         }
       }
 
@@ -230,7 +312,9 @@ export async function optimizeImage(
       };
     }
 
-    let sharpInstance = sharp(absoluteInputPath, isAnimated ? { animated: true } : {});
+    // Sharpのパス入力はlibvipsのcacheが元ファイルを保持し、Windowsのtrash移動と同名再作成を妨げるため先に読み切る
+    const inputBuffer = fs.readFileSync(absoluteInputPath);
+    let sharpInstance = sharp(inputBuffer, isAnimated ? { animated: true } : {});
 
     // メタデータ取得 (パーセント指定のリサイズに必要)
     const metadata = await sharpInstance.metadata();
@@ -317,7 +401,7 @@ export async function optimizeImage(
     if (finalBuffer.length > originalSize) {
       if (!formatChanged && !shouldResize) {
         // フォーマット変換なし: 元ファイルをそのまま使う
-        finalBuffer = fs.readFileSync(absoluteInputPath);
+        finalBuffer = inputBuffer;
         const msg = '圧縮後サイズが元より大きいため元ファイルを使用しました';
         warning = warning ? `${warning} / ${msg}` : msg;
       } else {
@@ -328,28 +412,23 @@ export async function optimizeImage(
       }
     }
 
-    const tempOutputPath = createTempOutputPath(absoluteOutputPath);
-    try {
-      fs.writeFileSync(tempOutputPath, finalBuffer);
-
-      if (samePath) {
-        await replaceSamePathFromTemp(
-          absoluteInputPath,
-          absoluteOutputPath,
-          tempOutputPath,
-          !!options.hardDelete
-        );
-      } else {
-        fs.copyFileSync(tempOutputPath, absoluteOutputPath);
-        if (options.hardDelete) {
-          deletePath(absoluteInputPath);
-        } else if (options.trashOriginal) {
-          await movePathToTrash(absoluteInputPath);
-        }
+    if (samePath) {
+      const { backupPath, trashError } = await replaceSamePathFromBuffer(
+        absoluteInputPath,
+        absoluteOutputPath,
+        finalBuffer,
+        !!options.hardDelete
+      );
+      if (backupPath) {
+        const backupWarning = createBackupWarning(backupPath, trashError);
+        warning = warning ? `${warning} / ${backupWarning}` : backupWarning;
       }
-    } finally {
-      if (fs.existsSync(tempOutputPath)) {
-        fs.unlinkSync(tempOutputPath);
+    } else {
+      fs.writeFileSync(absoluteOutputPath, finalBuffer);
+      if (options.hardDelete) {
+        deletePath(absoluteInputPath);
+      } else if (options.trashOriginal) {
+        await movePathToTrash(absoluteInputPath);
       }
     }
 
