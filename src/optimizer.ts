@@ -97,6 +97,50 @@ function isMissingPath(filePath: string): boolean {
   }
 }
 
+function isSameFile(inputPath: string, outputPath: string): boolean {
+  if (inputPath === outputPath) return true;
+
+  let inputStats: fs.Stats;
+  try {
+    inputStats = fs.statSync(inputPath);
+  } catch (error: any) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+
+  let outputStats: fs.Stats;
+  try {
+    outputStats = fs.statSync(outputPath);
+  } catch (error: any) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+
+  return inputStats.dev === outputStats.dev && inputStats.ino === outputStats.ino;
+}
+
+function createOutputStage(outputPath: string, outputBuffer: Buffer): string {
+  const directory = path.dirname(outputPath);
+  while (true) {
+    const stagePath = path.join(
+      directory,
+      `.imsq-stage-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`
+    );
+    try {
+      fs.writeFileSync(stagePath, outputBuffer, { flag: 'wx' });
+      return stagePath;
+    } catch (error: any) {
+      if (error.code === 'EEXIST') continue;
+      try {
+        fs.unlinkSync(stagePath);
+      } catch {
+        // 元画像を触る前のstage cleanupはベストエフォートで行う
+      }
+      throw error;
+    }
+  }
+}
+
 function restoreFromBackup(filePath: string, backupPath: string): void {
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
@@ -133,55 +177,66 @@ async function replaceSamePathFromBuffer(
 ): Promise<{ backupPath?: string; trashError?: unknown }> {
   let backupPath: string | undefined;
   let trashError: unknown;
-  if (hardDelete) {
-    deletePath(inputPath);
-  } else {
-    try {
-      await movePathToTrash(inputPath);
-      if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
-        throw new Error('元ファイルがゴミ箱へ移動されませんでした');
-      }
-    } catch (error) {
-      trashError = error;
-      if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
-        try {
-          backupPath = createBackupCopy(inputPath);
-        } catch (error: any) {
-          if (error.code !== 'ENOENT' || !isMissingPath(inputPath)) {
-            throw error;
-          }
+  const stagePath = createOutputStage(outputPath, outputBuffer);
+
+  try {
+    if (hardDelete) {
+      deletePath(inputPath);
+    } else {
+      try {
+        await movePathToTrash(inputPath);
+        if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
+          throw new Error('元ファイルがゴミ箱へ移動されませんでした');
         }
-        if (backupPath) {
+      } catch (error) {
+        trashError = error;
+        if (fs.existsSync(inputPath) || !isMissingPath(inputPath)) {
           try {
-            deletePath(inputPath);
-          } catch (err: any) {
-            if (err.code !== 'ENOENT') {
-              try {
-                deletePath(backupPath);
-              } catch {
-                // 退避ファイルを残して元画像を保護する
+            backupPath = createBackupCopy(inputPath);
+          } catch (error: any) {
+            if (error.code !== 'ENOENT' || !isMissingPath(inputPath)) {
+              throw error;
+            }
+          }
+          if (backupPath) {
+            try {
+              deletePath(inputPath);
+            } catch (err: any) {
+              if (err.code !== 'ENOENT') {
+                try {
+                  deletePath(backupPath);
+                } catch {
+                  // 退避ファイルを残して元画像を保護する
+                }
+                throw err;
               }
-              throw err;
             }
           }
         }
       }
     }
-  }
 
-  try {
-    fs.writeFileSync(outputPath, outputBuffer);
-  } catch (err) {
     try {
-      if (backupPath) {
-        restoreFromBackup(inputPath, backupPath);
-      } else {
-        fs.writeFileSync(inputPath, outputBuffer);
+      fs.renameSync(stagePath, outputPath);
+    } catch (err) {
+      try {
+        if (backupPath) {
+          restoreFromBackup(inputPath, backupPath);
+        } else {
+          fs.writeFileSync(inputPath, outputBuffer);
+        }
+      } catch {
+        // 復旧失敗時は元のエラーを優先する
       }
-    } catch {
-      // 復旧失敗時は元のエラーを優先する
+      throw err;
     }
-    throw err;
+  } catch (error) {
+    try {
+      deletePath(stagePath);
+    } catch {
+      // stage cleanupは元のエラーを優先する
+    }
+    throw error;
   }
 
   return { backupPath, trashError };
@@ -273,6 +328,8 @@ export async function optimizeImage(
     const isAnimated = originalExt === '.gif' || originalExt === '.webp';
     const outputDirPath = path.dirname(absoluteOutputPath);
     const samePath = absoluteInputPath === absoluteOutputPath;
+    const sameFile = isSameFile(absoluteInputPath, absoluteOutputPath);
+    const replaceInPlace = samePath || (sameFile && (options.hardDelete || options.trashOriginal));
     let warning: string | undefined;
 
     if (!fs.existsSync(outputDirPath)) {
@@ -280,7 +337,7 @@ export async function optimizeImage(
     }
 
     if (options.copyOnly) {
-      if (samePath) {
+      if (replaceInPlace) {
         const inputBuffer = fs.readFileSync(absoluteInputPath);
         const { backupPath, trashError } = await replaceSamePathFromBuffer(
           absoluteInputPath,
@@ -412,7 +469,7 @@ export async function optimizeImage(
       }
     }
 
-    if (samePath) {
+    if (replaceInPlace) {
       const { backupPath, trashError } = await replaceSamePathFromBuffer(
         absoluteInputPath,
         absoluteOutputPath,

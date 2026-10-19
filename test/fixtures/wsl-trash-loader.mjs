@@ -16,7 +16,6 @@ export const powerShellPath = async () => '/mnt/c/Windows/System32/WindowsPowerS
 import {Buffer} from 'node:buffer';
 import {promisify} from 'node:util';
 import fs from 'node:fs';
-import path from 'node:path';
 import {execFileSync as inspectOpenFiles} from 'node:child_process';
 
 function sourcePathIsOpen(filePath) {
@@ -59,13 +58,8 @@ execFile[promisify.custom] = async (file, args) => {
     && sourcePathIsOpen(process.env.IMSQ_TEST_WSL_SOURCE_PATH)) {
     throw new Error('input source remains open at the Windows trash boundary');
   }
-  if (process.env.IMSQ_TEST_WSL_DELETE_TEMP === '1') {
+  if (process.env.IMSQ_TEST_WSL_MOVE_SOURCE === '1') {
     fs.renameSync(process.env.IMSQ_TEST_WSL_SOURCE_PATH, process.env.IMSQ_TEST_WSL_BIN_PATH);
-    const directory = path.dirname(process.env.IMSQ_TEST_WSL_SOURCE_PATH);
-    const tempName = fs.readdirSync(directory).find(name => name.startsWith('.imsq-tmp-'));
-    if (tempName) {
-      fs.unlinkSync(path.join(directory, tempName));
-    }
     return {stdout: '', stderr: ''};
   }
   if (process.env.IMSQ_TEST_WSL_REJECT_AFTER_DELETE === '1') {
