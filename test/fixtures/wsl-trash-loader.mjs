@@ -1,12 +1,21 @@
 const mocks = new Map([
   ['wsl-utils', `
-export const isWsl = true;
+export const isWsl = process.env.IMSQ_TEST_NOT_WSL !== '1';
 export const canAccessPowerShell = async () => true;
 export const convertWslPathToWindows = async paths => {
   const isArray = Array.isArray(paths);
-  const values = (isArray ? paths : [paths]).map(path => process.env.IMSQ_TEST_WSL_CONVERSION_FAILURE === '1'
-    ? path
-    : String.raw\`C:\\\\Users\\\\nao\\\\画像 [a]'b.png\`);
+  const values = (isArray ? paths : [paths]).map(path => {
+    if (process.env.IMSQ_TEST_WSL_NOTIFY_UNC === '1' && isArray) {
+      return String.raw\`\\\\wsl.localhost\\Ubuntu\\home\\nao\\output\`;
+    }
+    if (process.env.IMSQ_TEST_WSL_NOTIFY_PATHS === '1' && isArray) {
+      const basename = path.slice(path.lastIndexOf('/') + 1);
+      return String.raw\`C:\\\\Users\\\\nao\\\\画像 [a]'b\` + '\\\\' + basename;
+    }
+    return process.env.IMSQ_TEST_WSL_CONVERSION_FAILURE === '1'
+      ? path
+      : String.raw\`C:\\\\Users\\\\nao\\\\画像 [a]'b.png\`;
+  });
   return isArray ? values : values[0];
 };
 export const isUncPath = value => /^\\\\\\\\/.test(value);
@@ -47,6 +56,23 @@ execFile[promisify.custom] = async (file, args) => {
     throw new Error('PowerShell executable path mismatch: ' + file);
   }
   const command = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+  if (command.includes('SHChangeNotify')) {
+    const requiredPaths = process.env.IMSQ_TEST_NOTIFICATION_REQUIRED_PATHS
+      ? JSON.parse(process.env.IMSQ_TEST_NOTIFICATION_REQUIRED_PATHS)
+      : [];
+    for (const requiredPath of requiredPaths) {
+      if (!fs.existsSync(requiredPath)) {
+        throw new Error('notification arrived before required output: ' + requiredPath);
+      }
+    }
+    if (process.env.IMSQ_TEST_NOTIFICATION_LOG) {
+      fs.appendFileSync(process.env.IMSQ_TEST_NOTIFICATION_LOG, JSON.stringify(command) + '\\n');
+    }
+    if (process.env.IMSQ_TEST_NOTIFICATION_ERROR === '1') {
+      throw new Error('simulated Shell notification failure');
+    }
+    return {stdout: '', stderr: ''};
+  }
   if (!command.includes('Test-Path -LiteralPath')) {
     throw new Error('WSL trash command must use LiteralPath');
   }

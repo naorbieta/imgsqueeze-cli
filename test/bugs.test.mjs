@@ -87,10 +87,10 @@ function runNodeScript({ cwd, scriptPath, env, nodeArgs = [] }) {
   });
 }
 
-function startWatch({ cwd, args, configHome = cwd }) {
-  const child = spawn(process.execPath, [cliPath, ...args], {
+function startWatch({ cwd, args, configHome = cwd, env = makeEnv(configHome), nodeArgs = [] }) {
+  const child = spawn(process.execPath, [...nodeArgs, cliPath, ...args], {
     cwd,
-    env: makeEnv(configHome),
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -126,6 +126,26 @@ function writePng(filePath) {
 function writeJpeg(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, jpeg);
+}
+
+function makeNotificationEnv(root, logPath, requiredPaths, extra = {}) {
+  return {
+    ...makeEnv(root),
+    IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+    SYSTEMROOT: windowsPowerShellRoot,
+    IMSQ_TEST_NOTIFICATION_LOG: logPath,
+    IMSQ_TEST_NOTIFICATION_REQUIRED_PATHS: JSON.stringify(requiredPaths),
+    ...extra,
+  };
+}
+
+function readNotificationCommands(logPath) {
+  if (!fs.existsSync(logPath)) return [];
+  return fs.readFileSync(logPath, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 function supportsCaseInsensitiveAliases(root) {
@@ -545,6 +565,164 @@ test('same-file aliases keep output and preserve the trashed original', async (t
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+test('WSL shell notification follows saved output and trash', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const inputPath = path.join(root, 'input.png');
+  const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  fs.writeFileSync(inputPath, resizePng);
+  fs.mkdirSync(path.dirname(binPath), { recursive: true });
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: ['--trash', '-l', 'w:2', '-d', '.'],
+      input: 'input.png\n',
+      env: makeNotificationEnv(root, notificationLog, [inputPath, binPath], {
+        IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        IMSQ_TEST_WSL_BIN_PATH: binPath,
+        IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+      }),
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 1/);
+    assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
+    assert.deepEqual(fs.readFileSync(binPath), resizePng);
+    const [command] = readNotificationCommands(notificationLog);
+    assert.match(command, /SHChangeNotify/);
+    assert.match(command, /0x1000/);
+    assert.match(command, /0x1005/);
+    assert.match(command, /ExactSpelling\s*=\s*true/);
+    assert.match(command, /LPWStr/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WSL shell notifications deduplicate output directories in one PowerShell call', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  const outputPaths = [
+    path.join(root, 'out', 'first.png'),
+    path.join(root, 'out', 'second.png'),
+    path.join(root, 'other', 'third.png'),
+  ];
+  writePng(path.join(root, 'first.png'));
+  writePng(path.join(root, 'second.png'));
+  writePng(path.join(root, 'third.png'));
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: [],
+      input: 'first.png -d out\nsecond.png -d out\nthird.png -d other\n',
+      env: makeNotificationEnv(root, notificationLog, outputPaths, {
+        IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+      }),
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 3/);
+    assert.equal(readNotificationCommands(notificationLog).length, 1);
+    const [command] = readNotificationCommands(notificationLog);
+    const escapedOutDirectory = String.raw`'C:\\Users\\nao\\画像 [a]''b\out'`;
+    const escapedOtherDirectory = String.raw`'C:\\Users\\nao\\画像 [a]''b\other'`;
+    assert.equal(command.split(escapedOutDirectory).length - 1, 1);
+    assert.equal(command.split(escapedOtherDirectory).length - 1, 1);
+    for (const outputPath of outputPaths) assert.equal(fs.existsSync(outputPath), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('notification failure keeps successful output and reports one warning', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const inputPath = path.join(root, 'input.png');
+  const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  fs.writeFileSync(inputPath, resizePng);
+  fs.mkdirSync(path.dirname(binPath), { recursive: true });
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: ['--trash', '-l', 'w:2', '-d', '.'],
+      input: 'input.png\n',
+      env: makeNotificationEnv(root, notificationLog, [inputPath, binPath], {
+        IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        IMSQ_TEST_WSL_BIN_PATH: binPath,
+        IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+        IMSQ_TEST_NOTIFICATION_ERROR: '1',
+      }),
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 1/);
+    assert.match(output, /画像は保存済みですが、エクスプローラへ更新を通知できませんでした。フォルダを手動で更新してください。/);
+    assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
+    assert.deepEqual(fs.readFileSync(binPath), resizePng);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('shell notification is skipped outside Windows-local WSL paths', async () => {
+  const cases = [
+    { name: 'non-WSL', env: { IMSQ_TEST_NOT_WSL: '1' } },
+    { name: 'UNC Linux path', env: { IMSQ_TEST_WSL_NOTIFY_UNC: '1' } },
+  ];
+  for (const testCase of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const notificationLog = path.join(root, 'notifications.jsonl');
+    writePng(path.join(root, 'input.png'));
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['-d', 'out'],
+        input: 'input.png\n',
+        env: makeNotificationEnv(root, notificationLog, [path.join(root, 'out', 'input.png')], testCase.env),
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, `${testCase.name}: ${output}`);
+      assert.equal(fs.existsSync(path.join(root, 'out', 'input.png')), true);
+      assert.deepEqual(readNotificationCommands(notificationLog), []);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('watch notifies after initial and queued output batches', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  writePng(path.join(root, 'initial.png'));
+  const env = makeNotificationEnv(root, notificationLog, [], {
+    IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+  });
+  const running = startWatch({
+    cwd: root,
+    args: ['-w', '--poll', '-d', 'out'],
+    env,
+    nodeArgs: ['--loader', wslTrashLoaderPath],
+  });
+  try {
+    await waitFor(() => fs.existsSync(path.join(root, 'out', 'initial.png')));
+    await waitFor(() => readNotificationCommands(notificationLog).length >= 1);
+    await waitFor(() => running.getOutput().stdout.includes('新しい画像が追加されるのを待っています'));
+    writePng(path.join(root, 'new.png'));
+    await waitFor(() => fs.existsSync(path.join(root, 'out', 'new.png')));
+    await waitFor(() => readNotificationCommands(notificationLog).length >= 2);
+    assert.equal(readNotificationCommands(notificationLog).length, 2);
+  } finally {
+    await stop(running.child);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('separate compressed output writes the final buffer before trash', async () => {

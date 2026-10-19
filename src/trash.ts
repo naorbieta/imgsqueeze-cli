@@ -47,3 +47,55 @@ export async function movePathToTrash(filePath: string): Promise<void> {
 
   await moveWindowsPathToTrash(filePath);
 }
+
+export async function notifyWindowsDirectories(directories: Iterable<string>): Promise<void> {
+  if (!isWsl) {
+    return;
+  }
+
+  const linuxPaths = [...new Set(directories)].filter(Boolean);
+  if (linuxPaths.length === 0) {
+    return;
+  }
+
+  const convertedPaths = await convertWslPathToWindows(linuxPaths);
+  const windowsPaths = [...new Set(convertedPaths)].filter((filePath) =>
+    !isUncPath(filePath) && /^[A-Za-z]:[\\/]/u.test(filePath));
+  if (windowsPaths.length === 0) {
+    return;
+  }
+
+  if (!(await canAccessPowerShell())) {
+    throw new Error('WSLからWindowsのPowerShellを実行できません。実行権限とWSLのWindows連携設定を確認してください。');
+  }
+
+  const escapedPaths = windowsPaths
+    .map((filePath) => executePowerShell.escapeArgument(filePath))
+    .join('\n');
+  const psScript = `
+$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ShellChangeNotifier {
+  [DllImport("shell32.dll", ExactSpelling = true)]
+  public static extern void SHChangeNotify(
+    int eventId,
+    uint flags,
+    [MarshalAs(UnmanagedType.LPWStr)] string path,
+    IntPtr item2);
+}
+'@
+$directories = @(
+${escapedPaths}
+)
+foreach ($directory in $directories) {
+  [ShellChangeNotifier]::SHChangeNotify(0x1000, 0x1005, $directory, [IntPtr]::Zero)
+}
+`.trim();
+
+  await executePowerShell(psScript, {
+    powerShellPath: await powerShellPath(),
+    timeout: 10000,
+  });
+}
