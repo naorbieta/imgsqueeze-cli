@@ -161,23 +161,27 @@ function parseLengthOption(length: string): {
   let heightSpec: number | string | undefined;
 
   const parts = length.trim().toLowerCase().split(/[\s,;]+/).filter(Boolean);
+  if (parts.length === 0) {
+    throw new Error('長さを指定してください。例: w:600, h:400, w:50%');
+  }
   for (const part of parts) {
-    const [axis, raw] = part.split(':', 2);
-    if ((axis !== 'w' && axis !== 'h') || !raw) {
+    const match = /^(w|h):(\d+(?:\.\d+)?%|\d+)$/.exec(part);
+    if (!match) {
       throw new Error(`無効な長さ指定です: "${part}"。 "w:600", "h:400", "w:50%" の形式で指定してください。`);
     }
+    const [, axis, raw] = match;
 
     const label = axis === 'w' ? '横幅' : '高さ';
     let spec: number | string;
     if (raw.endsWith('%')) {
       const pct = Number.parseFloat(raw);
-      if (Number.isNaN(pct) || pct <= 0) {
+      if (!Number.isFinite(pct) || pct <= 0) {
         throw new Error(`${label}のパーセント値が不正です: "${part}"`);
       }
       spec = raw;
     } else {
       const value = Number.parseInt(raw, 10);
-      if (Number.isNaN(value) || value <= 0) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
         throw new Error(`${label}の値が不正です: "${part}"`);
       }
       spec = value;
@@ -497,6 +501,10 @@ function parseOptionTokens(tokens: string[]): StoredOptions {
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
+    if (['-f', '--format', '-s', '--size', '-l', '--length', '-n', '--name', '-d', '--directory'].includes(token)
+      && (tokens[i + 1] === undefined || tokens[i + 1].startsWith('-'))) {
+      throw new Error(`${token} の値を指定してください。`);
+    }
     switch (token) {
       case '-f':
       case '--format':
@@ -901,6 +909,8 @@ async function main(): Promise<void> {
       console.log(chalk.cyan('起動時処理を開始します...'));
       const imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
       if (imageFiles.length > 0) {
+        const protectedInputPaths = new Set(imageFiles.map((file) => path.resolve(cwd, file)));
+        const writtenOutputPaths = new Set<string>();
         const initialOutputDirectories = new Set<string>();
         let format: string | undefined;
         let targetSize: number | undefined;
@@ -938,6 +948,8 @@ async function main(): Promise<void> {
             copyOnly,
             hardDelete: !!options.hard,
             trashOriginal: !!options.trash,
+            protectedInputPaths,
+            writtenOutputPaths,
           });
 
           if (result.success) {
@@ -945,6 +957,7 @@ async function main(): Promise<void> {
             totalOriginalSize += result.originalSize;
             totalOutputSize += result.outputSize || 0;
             if (result.outputPath) {
+              writtenOutputPaths.add(path.resolve(cwd, result.outputPath));
               initialOutputDirectories.add(path.dirname(path.resolve(cwd, result.outputPath)));
             }
 
@@ -1141,6 +1154,7 @@ async function main(): Promise<void> {
   }
 
   const targetFiles: Array<{ file: string; fileOptions: StoredOptions }> = [];
+  let rejectedLineCount = 0;
 
   if (isPipe) {
     const stdinContent = await readStdin();
@@ -1168,6 +1182,9 @@ async function main(): Promise<void> {
             overrideOptions.confirm ? '-c, --confirm' : undefined,
           ].filter((value): value is string => value !== undefined);
           if (unsupportedLineOptions.length > 0) {
+            failureCount++;
+            rejectedLineCount++;
+            process.exitCode = 1;
             console.error(chalk.red(
               `行のオプションエラー ("${trimmed}"): ${unsupportedLineOptions.join('、')} はパイプ入力の行別指定では使用できません。`,
             ));
@@ -1175,6 +1192,9 @@ async function main(): Promise<void> {
           }
           fileOptions = mergeOptions(options, overrideOptions);
         } catch (err: any) {
+          failureCount++;
+          rejectedLineCount++;
+          process.exitCode = 1;
           console.error(chalk.red(`行のパースエラー ("${trimmed}"): ${err.message}`));
           continue;
         }
@@ -1184,6 +1204,7 @@ async function main(): Promise<void> {
     }
 
     if (targetFiles.length === 0) {
+      if (failureCount > 0) process.exitCode = 1;
       console.log(chalk.yellow('標準入力から処理対象の画像リストが読み込めませんでした。'));
       return;
     }
@@ -1196,12 +1217,17 @@ async function main(): Promise<void> {
 
     if (options.pick) {
       console.log(chalk.cyan('\n対話モード: スペースキーで選択/解除、Enterで確定、Escでキャンセル\n'));
+      const controller = new AbortController();
+      const onKeypress = (_text: string, key: { name?: string }) => {
+        if (key?.name === 'escape') controller.abort();
+      };
+      process.stdin.on('keypress', onKeypress);
       try {
         const selected = await checkbox({
           message: '処理する画像を選択してください:',
           choices: imageFiles.map((file) => ({ name: file, value: file, checked: true })),
           pageSize: 20,
-        });
+        }, { signal: controller.signal });
         if (selected.length === 0) {
           console.log(chalk.yellow('画像が選択されませんでした。処理を中断します。'));
           return;
@@ -1210,6 +1236,8 @@ async function main(): Promise<void> {
       } catch {
         console.log(chalk.yellow('\n選択がキャンセルされました。'));
         return;
+      } finally {
+        process.stdin.off('keypress', onKeypress);
       }
     }
 
@@ -1228,6 +1256,8 @@ async function main(): Promise<void> {
   }
 
   const outputDirectories = new Set<string>();
+  const protectedInputPaths = new Set(targetFiles.map(({ file }) => path.resolve(cwd, file)));
+  const writtenOutputPaths = new Set<string>();
 
   for (let i = 0; i < targetFiles.length; i++) {
     const { file, fileOptions } = targetFiles[i];
@@ -1302,6 +1332,8 @@ async function main(): Promise<void> {
       copyOnly,
       hardDelete: !!fileOptions.hard,
       trashOriginal: !!fileOptions.trash,
+      protectedInputPaths,
+      writtenOutputPaths,
     });
 
     if (result.success) {
@@ -1309,6 +1341,7 @@ async function main(): Promise<void> {
       totalOriginalSize += result.originalSize;
       totalOutputSize += result.outputSize || 0;
       if (result.outputPath) {
+        writtenOutputPaths.add(path.resolve(cwd, result.outputPath));
         outputDirectories.add(path.dirname(path.resolve(cwd, result.outputPath)));
       }
 
@@ -1332,7 +1365,7 @@ async function main(): Promise<void> {
     : chalk.yellow(`-${formatSize(Math.abs(netReduction))}（増加）`);
 
   console.log(chalk.bold.green('処理完了\n'));
-  console.log(`対象ファイル数 : ${targetFiles.length}`);
+  console.log(`対象ファイル数 : ${targetFiles.length + rejectedLineCount}`);
   console.log(`成功           : ${successCount}`);
   console.log(`失敗           : ${failureCount}`);
   console.log(`総削減容量     : ${totalReductionLabel}`);

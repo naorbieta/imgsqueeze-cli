@@ -53,15 +53,9 @@ async function compress(
  * *** → 3桁 (001, 002, ...)
  */
 function applyNamePattern(pattern: string, originalBaseName: string, index: number, ext: string): string {
-  // *** から順に長いものから置換 (短いパターンに誤マッチしないよう)
-  let result = pattern.replaceAll('?', originalBaseName);
-  if (result.includes('***')) {
-    result = result.replace('***', String(index).padStart(3, '0'));
-  } else if (result.includes('**')) {
-    result = result.replace('**', String(index).padStart(2, '0'));
-  } else if (result.includes('*')) {
-    result = result.replace('*', String(index));
-  }
+  const result = pattern.replace(/\?|\*+/g, (token) => token === '?'
+    ? originalBaseName
+    : String(index).padStart(token.length, '0'));
   return result + ext;
 }
 
@@ -117,6 +111,19 @@ function isSameFile(inputPath: string, outputPath: string): boolean {
   }
 
   return inputStats.dev === outputStats.dev && inputStats.ino === outputStats.ino;
+}
+
+function pathSetContainsSameFile(
+  filePath: string,
+  paths: ReadonlySet<string> | undefined,
+): boolean {
+  if (!paths || paths.size === 0) return false;
+  if (paths.has(filePath)) return true;
+  if (isMissingPath(filePath)) return false;
+  for (const knownPath of paths) {
+    if (isSameFile(filePath, knownPath)) return true;
+  }
+  return false;
 }
 
 function createOutputStage(outputPath: string, outputBuffer: Buffer): string {
@@ -264,6 +271,8 @@ export async function optimizeImage(
     copyOnly?: boolean;
     hardDelete?: boolean;
     trashOriginal?: boolean;
+    protectedInputPaths?: ReadonlySet<string>;
+    writtenOutputPaths?: ReadonlySet<string>;
   }
 ): Promise<OptimizeResult> {
   const absoluteInputPath = path.resolve(options.cwd, inputPath);
@@ -294,7 +303,7 @@ export async function optimizeImage(
 
   if (options.namePattern) {
     // --name パターン指定時: ファイル名をパターンで置き換える
-    const originalBaseName = path.basename(inputPath, originalExt);
+    const originalBaseName = path.basename(inputPath, path.extname(inputPath));
     const newFileName = applyNamePattern(
       options.namePattern,
       originalBaseName,
@@ -324,11 +333,17 @@ export async function optimizeImage(
   }
 
   try {
-    // アニメーションGIF/WebPの場合はフレームを維持して読み込む
-    const isAnimated = originalExt === '.gif' || originalExt === '.webp';
+    const isAnimated = (originalExt === '.gif' || originalExt === '.webp')
+      && (formatName === 'gif' || formatName === 'webp');
     const outputDirPath = path.dirname(absoluteOutputPath);
     const samePath = absoluteInputPath === absoluteOutputPath;
     const sameFile = isSameFile(absoluteInputPath, absoluteOutputPath);
+    if (!sameFile && pathSetContainsSameFile(absoluteOutputPath, options.protectedInputPaths)) {
+      throw new Error(`出力先が別の処理対象画像と重複しています: ${absoluteOutputPath}。-d または -n で出力先を変更してください。`);
+    }
+    if (!sameFile && pathSetContainsSameFile(absoluteOutputPath, options.writtenOutputPaths)) {
+      throw new Error(`出力先が処理済みの画像と重複しています: ${absoluteOutputPath}。-n で連番を指定してください。`);
+    }
     const replaceInPlace = samePath || (sameFile && (options.hardDelete || options.trashOriginal));
     let warning: string | undefined;
 
@@ -371,7 +386,7 @@ export async function optimizeImage(
 
     // Sharpのパス入力はlibvipsのcacheが元ファイルを保持し、Windowsのtrash移動と同名再作成を妨げるため先に読み切る
     const inputBuffer = fs.readFileSync(absoluteInputPath);
-    let sharpInstance = sharp(inputBuffer, isAnimated ? { animated: true } : {});
+    let sharpInstance = sharp(inputBuffer, { animated: isAnimated }).autoOrient();
 
     // メタデータ取得 (パーセント指定のリサイズに必要)
     const metadata = await sharpInstance.metadata();
@@ -388,14 +403,15 @@ export async function optimizeImage(
       // パーセント → ピクセルへ変換
       if (typeof widthSpec === 'string' && widthSpec.endsWith('%')) {
         const pct = parseFloat(widthSpec) / 100;
-        if (metadata.width) pixelWidth = Math.round(metadata.width * pct);
+        pixelWidth = Math.max(1, Math.round(metadata.autoOrient.width * pct));
       } else if (typeof widthSpec === 'number') {
         pixelWidth = widthSpec;
       }
 
       if (typeof heightSpec === 'string' && heightSpec.endsWith('%')) {
         const pct = parseFloat(heightSpec) / 100;
-        if (metadata.height) pixelHeight = Math.round(metadata.height * pct);
+        const frameHeight = metadata.pageHeight ?? metadata.autoOrient.height;
+        if (frameHeight) pixelHeight = Math.max(1, Math.round(frameHeight * pct));
       } else if (typeof heightSpec === 'number') {
         pixelHeight = heightSpec;
       }
