@@ -113,6 +113,19 @@ function isSameFile(inputPath: string, outputPath: string): boolean {
   return inputStats.dev === outputStats.dev && inputStats.ino === outputStats.ino;
 }
 
+function pathSetContainsSameFile(
+  filePath: string,
+  paths: ReadonlySet<string> | undefined,
+): boolean {
+  if (!paths || paths.size === 0) return false;
+  if (paths.has(filePath)) return true;
+  if (isMissingPath(filePath)) return false;
+  for (const knownPath of paths) {
+    if (isSameFile(filePath, knownPath)) return true;
+  }
+  return false;
+}
+
 function createOutputStage(outputPath: string, outputBuffer: Buffer): string {
   const directory = path.dirname(outputPath);
   while (true) {
@@ -325,10 +338,10 @@ export async function optimizeImage(
     const outputDirPath = path.dirname(absoluteOutputPath);
     const samePath = absoluteInputPath === absoluteOutputPath;
     const sameFile = isSameFile(absoluteInputPath, absoluteOutputPath);
-    if (!sameFile && options.protectedInputPaths?.has(absoluteOutputPath)) {
+    if (!sameFile && pathSetContainsSameFile(absoluteOutputPath, options.protectedInputPaths)) {
       throw new Error(`出力先が別の処理対象画像と重複しています: ${absoluteOutputPath}。-d または -n で出力先を変更してください。`);
     }
-    if (!sameFile && options.writtenOutputPaths?.has(absoluteOutputPath)) {
+    if (!sameFile && pathSetContainsSameFile(absoluteOutputPath, options.writtenOutputPaths)) {
       throw new Error(`出力先が処理済みの画像と重複しています: ${absoluteOutputPath}。-n で連番を指定してください。`);
     }
     const replaceInPlace = samePath || (sameFile && (options.hardDelete || options.trashOriginal));
