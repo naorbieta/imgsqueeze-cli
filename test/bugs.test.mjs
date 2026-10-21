@@ -5,11 +5,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import sharp from 'sharp';
 
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = path.join(repoDir, 'dist', 'index.js');
+const failTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'fail-trash-loader.mjs');
+const wslTrashLoaderPath = path.join(repoDir, 'test', 'fixtures', 'wsl-trash-loader.mjs');
+const wslTrashProbePath = path.join(repoDir, 'test', 'fixtures', 'wsl-trash-probe.mjs');
+const wslExistsRacePreloadPath = path.join(repoDir, 'test', 'fixtures', 'wsl-exists-race-preload.mjs');
+const wslPowerShellPath = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
+const windowsPowerShellRoot = String.raw`C:\Windows`;
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
+const resizePng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAYAAAD5PA/NAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAD0lEQVQImWP4z8DwHxkDAEPNB/nd70idAAAAAElFTkSuQmCC',
+  'base64',
+);
+const jpeg = Buffer.from(
+  '/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABkAMgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAYH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AnwGlIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//2Q==',
   'base64',
 );
 
@@ -25,9 +40,9 @@ function makeEnv(configHome) {
   };
 }
 
-function runCli({ cwd, args, input = '', env = makeEnv(cwd), timeout = 10000 }) {
+function runCli({ cwd, args, input = '', env = makeEnv(cwd), timeout = 10000, nodeArgs = [] }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
+    const child = spawn(process.execPath, [...nodeArgs, cliPath, ...args], {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -54,10 +69,28 @@ function runCli({ cwd, args, input = '', env = makeEnv(cwd), timeout = 10000 }) 
   });
 }
 
-function startWatch({ cwd, args, configHome = cwd }) {
-  const child = spawn(process.execPath, [cliPath, ...args], {
+function runNodeScript({ cwd, scriptPath, env, nodeArgs = [] }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...nodeArgs, scriptPath], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code, signal) => resolve({code, signal, stdout, stderr}));
+  });
+}
+
+function startWatch({ cwd, args, configHome = cwd, env = makeEnv(configHome), nodeArgs = [] }) {
+  const child = spawn(process.execPath, [...nodeArgs, cliPath, ...args], {
     cwd,
-    env: makeEnv(configHome),
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -89,6 +122,671 @@ function writePng(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, png);
 }
+
+function writeJpeg(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, jpeg);
+}
+
+function makeNotificationEnv(root, logPath, requiredPaths, extra = {}) {
+  return {
+    ...makeEnv(root),
+    IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+    SYSTEMROOT: windowsPowerShellRoot,
+    IMSQ_TEST_NOTIFICATION_LOG: logPath,
+    IMSQ_TEST_NOTIFICATION_REQUIRED_PATHS: JSON.stringify(requiredPaths),
+    ...extra,
+  };
+}
+
+function readNotificationCommands(logPath) {
+  if (!fs.existsSync(logPath)) return [];
+  return fs.readFileSync(logPath, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function supportsCaseInsensitiveAliases(root) {
+  const inputPath = path.join(root, 'CaseAlias');
+  const aliasPath = path.join(root, 'casealias');
+  fs.writeFileSync(inputPath, 'probe');
+  try {
+    return fs.existsSync(aliasPath);
+  } finally {
+    fs.rmSync(inputPath, { force: true });
+  }
+}
+
+const canInspectOpenFiles = process.platform === 'darwin'
+  ? fs.existsSync('/usr/sbin/lsof')
+  : process.platform === 'linux' && fs.existsSync('/proc/self/fd');
+
+test('same-path output keeps a hidden backup when trash fails or does nothing', async () => {
+  const trashCases = [
+    {
+      env: { IMSQ_TEST_TRASH_STDERR: 'PowerShell: Access is denied' },
+      reason: 'PowerShell: Access is denied',
+    },
+    {
+      env: {
+        IMSQ_TEST_TRASH_MESSAGE: 'PowerShell failed: C:\\Windows\\System32\\powershell.exe -EncodedCommand VERY_LONG_ENCODED_COMMAND',
+      },
+      reason: 'PowerShell failed: C:\\Windows\\System32\\powershell.exe -EncodedCommand (省略)',
+      hidden: 'VERY_LONG_ENCODED_COMMAND',
+    },
+    {
+      env: { IMSQ_TEST_TRASH_NOOP: '1' },
+      reason: '元ファイルがゴミ箱へ移動されませんでした',
+    },
+  ];
+  for (const trashCase of trashCases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    writePng(inputPath);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['-d', '.'],
+        input: 'input.png\n',
+        env: { ...makeEnv(root), ...trashCase.env },
+        nodeArgs: ['--loader', failTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      const backupNames = fs.readdirSync(root).filter((name) => name.startsWith('.imsq-backup-'));
+
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.existsSync(inputPath), true);
+      assert.equal(backupNames.length, 1);
+      assert.deepEqual(fs.readFileSync(path.join(root, backupNames[0])), png);
+      assert.match(output, /ゴミ箱へ移動できなかったため.*バックアップ.*\.imsq-backup-/);
+      const flattenedOutput = output.replace(/\s+/gu, ' ');
+      assert.ok(flattenedOutput.includes(trashCase.reason), flattenedOutput);
+      if (trashCase.hidden) assert.doesNotMatch(output, new RegExp(trashCase.hidden));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('WSL Windows-local trash passes the WSL PowerShell path and preserves literal paths', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const env = {
+    ...makeEnv(root),
+    IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+    SYSTEMROOT: windowsPowerShellRoot,
+  };
+  try {
+    const result = await runNodeScript({
+      cwd: repoDir,
+      scriptPath: wslTrashProbePath,
+      env,
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /WSL trash boundary passed/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WSL trash handles same-path and separate-output CLI flows without a backup warning', async () => {
+  for (const outputDir of ['.', 'out']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputName = 'input.png';
+    const inputPath = path.join(root, inputName);
+    writePng(inputPath);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-d', outputDir],
+        input: `${inputName}\n`,
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /バックアップ/);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+      assert.equal(fs.existsSync(path.join(root, outputDir, inputName)), true);
+      if (outputDir === 'out') {
+        assert.equal(fs.existsSync(inputPath), false);
+      }
+    } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('WSL trash keeps same-path output when the original reaches the bin before PowerShell rejects', async () => {
+  for (const staleExists of [false, true]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-l', 'w:2', '-d', '.'],
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_REJECT_AFTER_DELETE: '1',
+        },
+        nodeArgs: staleExists
+          ? ['--import', wslExistsRacePreloadPath, '--loader', wslTrashLoaderPath]
+          : ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /ゴミ箱へ移動できなかったため/);
+      assert.equal(fs.existsSync(inputPath), true);
+      assert.equal(fs.existsSync(path.join(root, 'simulated-recycle-bin', 'input.png')), true);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+      assert.equal(fs.readFileSync(binPath).readUInt32BE(16), 4);
+      assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('JPEG same-path trash has no Sharp input handle at the Windows boundary', { skip: !canInspectOpenFiles }, async () => {
+  const cases = [
+    { args: ['--trash', '-l', 'w:2', '-d', '.'], outputWidth: 2 },
+    { args: ['--trash', '-d', '.'], outputWidth: 200 },
+  ];
+  for (const testCase of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.jpg');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.jpg');
+    writeJpeg(inputPath);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: testCase.args,
+        input: 'input.jpg\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+          IMSQ_TEST_FAIL_IF_SOURCE_OPEN: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /画像処理エラー|バックアップ/);
+      assert.equal(fs.existsSync(inputPath), true);
+      assert.equal(fs.existsSync(binPath), true);
+      assert.equal(fs.readdirSync(root).some(name => name.startsWith('.imsq-backup-')), false);
+      const metadata = await sharp(inputPath).metadata();
+      assert.equal(metadata.width, testCase.outputWidth);
+      assert.deepEqual(fs.readFileSync(binPath), jpeg);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('same-path output survives a WSL boundary that moves the original to the bin', async () => {
+  const cases = [
+    { args: ['--trash', '-l', 'w:2', '-d', '.'], outputPath: 'input.png', outputWidth: 2, inputRemains: true },
+    { args: ['--trash', '-n', '?', '-d', '.'], outputPath: 'input.png', outputWidth: 4, inputRemains: true },
+  ];
+  for (const testCase of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: testCase.args,
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.doesNotMatch(output, /画像処理エラー|バックアップ/);
+      const outputPath = path.join(root, testCase.outputPath);
+      assert.equal(fs.existsSync(outputPath), true);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), testCase.outputWidth);
+      if (testCase.outputWidth === 4) {
+        assert.deepEqual(fs.readFileSync(outputPath), resizePng);
+      }
+      assert.equal(fs.existsSync(inputPath), testCase.inputRemains);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+      assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.imsq-backup-')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('same-file aliases keep output and preserve the trashed original', async (t) => {
+  await t.test('case alias with resize and trash', async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    if (!supportsCaseInsensitiveAliases(root)) {
+      t.skip('case-insensitive filesystem is required');
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    }
+    const inputPath = path.join(root, 'input.PNG');
+    const outputPath = path.join(root, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-l', 'w:2', '-d', '.'],
+        input: 'input.PNG\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 2);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('directory symlink alias with resize and trash', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const realDir = path.join(root, 'real');
+    const aliasDir = path.join(root, 'alias');
+    const inputPath = path.join(realDir, 'input.png');
+    const outputPath = path.join(aliasDir, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.mkdirSync(realDir);
+    fs.symlinkSync(realDir, aliasDir, 'dir');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-l', 'w:2', '-d', 'alias'],
+        input: 'real/input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 2);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('hardlink alias with trash keeps the bin bytes', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    const outputDir = path.join(root, 'out');
+    const outputPath = path.join(outputDir, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.mkdirSync(outputDir);
+    fs.writeFileSync(inputPath, resizePng);
+    fs.linkSync(inputPath, outputPath);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-l', 'w:2', '-d', 'out'],
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 2);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('case alias copy-only keeps the output', async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    if (!supportsCaseInsensitiveAliases(root)) {
+      t.skip('case-insensitive filesystem is required');
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    }
+    const inputPath = path.join(root, 'input.PNG');
+    const outputPath = path.join(root, 'input.png');
+    const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-n', 'input', '-d', '.'],
+        input: 'input.PNG\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          IMSQ_TEST_WSL_BIN_PATH: binPath,
+          IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 4);
+      assert.deepEqual(fs.readFileSync(binPath), resizePng);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('case alias with hard delete keeps the output', async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    if (!supportsCaseInsensitiveAliases(root)) {
+      t.skip('case-insensitive filesystem is required');
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    }
+    const inputPath = path.join(root, 'input.PNG');
+    const outputPath = path.join(root, 'input.png');
+    fs.writeFileSync(inputPath, resizePng);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--hard', '-l', 'w:2', '-d', '.'],
+        input: 'input.PNG\n',
+        env: makeEnv(root),
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 1/);
+      assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 2);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test('WSL shell notification follows saved output and trash', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const inputPath = path.join(root, 'input.png');
+  const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  fs.writeFileSync(inputPath, resizePng);
+  fs.mkdirSync(path.dirname(binPath), { recursive: true });
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: ['--trash', '-l', 'w:2', '-d', '.'],
+      input: 'input.png\n',
+      env: makeNotificationEnv(root, notificationLog, [inputPath, binPath], {
+        IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        IMSQ_TEST_WSL_BIN_PATH: binPath,
+        IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+      }),
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 1/);
+    assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
+    assert.deepEqual(fs.readFileSync(binPath), resizePng);
+    const [command] = readNotificationCommands(notificationLog);
+    assert.match(command, /SHChangeNotify/);
+    assert.match(command, /0x1000/);
+    assert.match(command, /0x1005/);
+    assert.match(command, /ExactSpelling\s*=\s*true/);
+    assert.match(command, /LPWStr/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WSL shell notifications deduplicate output directories in one PowerShell call', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  const outputPaths = [
+    path.join(root, 'out', 'first.png'),
+    path.join(root, 'out', 'second.png'),
+    path.join(root, 'other', 'third.png'),
+  ];
+  writePng(path.join(root, 'first.png'));
+  writePng(path.join(root, 'second.png'));
+  writePng(path.join(root, 'third.png'));
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: [],
+      input: 'first.png -d out\nsecond.png -d out\nthird.png -d other\n',
+      env: makeNotificationEnv(root, notificationLog, outputPaths, {
+        IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+      }),
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 3/);
+    assert.equal(readNotificationCommands(notificationLog).length, 1);
+    const [command] = readNotificationCommands(notificationLog);
+    const escapedOutDirectory = String.raw`'C:\\Users\\nao\\画像 [a]''b\out'`;
+    const escapedOtherDirectory = String.raw`'C:\\Users\\nao\\画像 [a]''b\other'`;
+    assert.equal(command.split(escapedOutDirectory).length - 1, 1);
+    assert.equal(command.split(escapedOtherDirectory).length - 1, 1);
+    for (const outputPath of outputPaths) assert.equal(fs.existsSync(outputPath), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('notification failure keeps successful output and reports one warning', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const inputPath = path.join(root, 'input.png');
+  const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  fs.writeFileSync(inputPath, resizePng);
+  fs.mkdirSync(path.dirname(binPath), { recursive: true });
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: ['--trash', '-l', 'w:2', '-d', '.'],
+      input: 'input.png\n',
+      env: makeNotificationEnv(root, notificationLog, [inputPath, binPath], {
+        IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        IMSQ_TEST_WSL_BIN_PATH: binPath,
+        IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+        IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+        IMSQ_TEST_NOTIFICATION_ERROR: '1',
+      }),
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 1/);
+    assert.match(output, /画像は保存済みですが、エクスプローラへ更新を通知できませんでした。フォルダを手動で更新してください。/);
+    assert.equal(fs.readFileSync(inputPath).readUInt32BE(16), 2);
+    assert.deepEqual(fs.readFileSync(binPath), resizePng);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('shell notification is skipped outside Windows-local WSL paths', async () => {
+  const cases = [
+    { name: 'non-WSL', env: { IMSQ_TEST_NOT_WSL: '1' } },
+    { name: 'UNC Linux path', env: { IMSQ_TEST_WSL_NOTIFY_UNC: '1' } },
+  ];
+  for (const testCase of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const notificationLog = path.join(root, 'notifications.jsonl');
+    writePng(path.join(root, 'input.png'));
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['-d', 'out'],
+        input: 'input.png\n',
+        env: makeNotificationEnv(root, notificationLog, [path.join(root, 'out', 'input.png')], testCase.env),
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, `${testCase.name}: ${output}`);
+      assert.equal(fs.existsSync(path.join(root, 'out', 'input.png')), true);
+      assert.deepEqual(readNotificationCommands(notificationLog), []);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('watch notifies after initial and queued output batches', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const notificationLog = path.join(root, 'notifications.jsonl');
+  writePng(path.join(root, 'initial.png'));
+  const env = makeNotificationEnv(root, notificationLog, [], {
+    IMSQ_TEST_WSL_NOTIFY_PATHS: '1',
+  });
+  const running = startWatch({
+    cwd: root,
+    args: ['-w', '--poll', '-d', 'out'],
+    env,
+    nodeArgs: ['--loader', wslTrashLoaderPath],
+  });
+  try {
+    await waitFor(() => fs.existsSync(path.join(root, 'out', 'initial.png')));
+    await waitFor(() => readNotificationCommands(notificationLog).length >= 1);
+    await waitFor(() => running.getOutput().stdout.includes('新しい画像が追加されるのを待っています'));
+    writePng(path.join(root, 'new.png'));
+    await waitFor(() => fs.existsSync(path.join(root, 'out', 'new.png')));
+    await waitFor(() => readNotificationCommands(notificationLog).length >= 2);
+    assert.equal(readNotificationCommands(notificationLog).length, 2);
+  } finally {
+    await stop(running.child);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('separate compressed output writes the final buffer before trash', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+  const inputPath = path.join(root, 'input.png');
+  const binPath = path.join(root, 'simulated-recycle-bin', 'input.png');
+  fs.writeFileSync(inputPath, resizePng);
+  fs.mkdirSync(path.dirname(binPath), { recursive: true });
+  try {
+    const result = await runCli({
+      cwd: root,
+      args: ['--trash', '-l', 'w:2', '-d', 'out'],
+      input: 'input.png\n',
+      env: {
+        ...makeEnv(root),
+        IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+        SYSTEMROOT: windowsPowerShellRoot,
+        IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+        IMSQ_TEST_WSL_BIN_PATH: binPath,
+        IMSQ_TEST_WSL_MOVE_SOURCE: '1',
+      },
+      nodeArgs: ['--loader', wslTrashLoaderPath],
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.code, 0, output);
+    assert.match(output, /成功\s+: 1/);
+    assert.doesNotMatch(output, /画像処理エラー|バックアップ/);
+    const outputPath = path.join(root, 'out', 'input.png');
+    assert.equal(fs.readFileSync(outputPath).readUInt32BE(16), 2);
+    assert.equal(fs.existsSync(inputPath), false);
+    assert.deepEqual(fs.readFileSync(binPath), resizePng);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WSL trash does not report success when conversion fails or PowerShell leaves the input', async () => {
+  for (const mode of ['conversion', 'noop']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));
+    const inputPath = path.join(root, 'input.png');
+    writePng(inputPath);
+    try {
+      const result = await runCli({
+        cwd: root,
+        args: ['--trash', '-d', 'out'],
+        input: 'input.png\n',
+        env: {
+          ...makeEnv(root),
+          IMSQ_TEST_EXPECTED_PS_PATH: wslPowerShellPath,
+          SYSTEMROOT: windowsPowerShellRoot,
+          IMSQ_TEST_WSL_SOURCE_PATH: inputPath,
+          ...(mode === 'conversion' ? {IMSQ_TEST_WSL_CONVERSION_FAILURE: '1'} : {IMSQ_TEST_WSL_NOOP: '1'}),
+        },
+        nodeArgs: ['--loader', wslTrashLoaderPath],
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, 0, output);
+      assert.match(output, /成功\s+: 0/);
+      assert.equal(fs.existsSync(inputPath), true);
+    } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
 
 test('pipe recursive input outside cwd is rejected without writing outside outputDir', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'imgsqueeze-'));

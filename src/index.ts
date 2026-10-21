@@ -632,17 +632,20 @@ function extractEffectiveOptions(): StoredOptions {
 async function loadProcessingDeps(): Promise<{
   ora: typeof import('ora').default;
   optimizeImage: typeof import('./optimizer.js').optimizeImage;
+  notifyWindowsDirectories: typeof import('./trash.js').notifyWindowsDirectories;
 }> {
   const emitWarning = process.emitWarning;
   try {
     process.emitWarning = (() => undefined) as typeof process.emitWarning;
-    const [oraModule, optimizerModule] = await Promise.all([
+    const [oraModule, optimizerModule, trashModule] = await Promise.all([
       import('ora'),
       import('./optimizer.js'),
+      import('./trash.js'),
     ]);
     return {
       ora: oraModule.default,
       optimizeImage: optimizerModule.optimizeImage,
+      notifyWindowsDirectories: trashModule.notifyWindowsDirectories,
     };
   } finally {
     process.emitWarning = emitWarning;
@@ -866,12 +869,29 @@ async function main(): Promise<void> {
     const outputDirLabel = displayOutputDir(cwd, outputDir, options.directory);
     console.log(chalk.blue(`\n出力先ディレクトリ: ${outputDirLabel}/\n`));
   }
-  const { ora, optimizeImage } = await loadProcessingDeps();
+  const { ora, optimizeImage, notifyWindowsDirectories } = await loadProcessingDeps();
 
   let successCount = 0;
   let failureCount = 0;
   let totalOriginalSize = 0;
   let totalOutputSize = 0;
+  let explorerWarningShown = false;
+
+  const notifyOutputDirectories = async (directories: Iterable<string>): Promise<void> => {
+    const values = [...new Set(directories)];
+    if (values.length === 0) {
+      return;
+    }
+
+    try {
+      await notifyWindowsDirectories(values);
+    } catch {
+      if (!explorerWarningShown) {
+        explorerWarningShown = true;
+        console.log(chalk.yellow('画像は保存済みですが、エクスプローラへ更新を通知できませんでした。フォルダを手動で更新してください。'));
+      }
+    }
+  };
 
   if (options.watch) {
     let watchAssignedCount = 0;
@@ -881,6 +901,7 @@ async function main(): Promise<void> {
       console.log(chalk.cyan('起動時処理を開始します...'));
       const imageFiles = await scanImages(cwd, !!options.recursive, ignoreDirs);
       if (imageFiles.length > 0) {
+        const initialOutputDirectories = new Set<string>();
         let format: string | undefined;
         let targetSize: number | undefined;
         let widthSpec: number | string | undefined;
@@ -923,6 +944,9 @@ async function main(): Promise<void> {
             successCount++;
             totalOriginalSize += result.originalSize;
             totalOutputSize += result.outputSize || 0;
+            if (result.outputPath) {
+              initialOutputDirectories.add(path.dirname(path.resolve(cwd, result.outputPath)));
+            }
 
             spinner.succeed(chalk.green(`${displayIndex} ${file}`));
             printFileResult(result, file);
@@ -932,6 +956,8 @@ async function main(): Promise<void> {
             console.log(chalk.red(`  エラー     : ${result.error}\n`));
           }
         }
+
+        await notifyOutputDirectories(initialOutputDirectories);
 
         const netReductionWatch = totalOriginalSize - totalOutputSize;
         const totalReductionWatchLabel = netReductionWatch >= 0
@@ -956,8 +982,6 @@ async function main(): Promise<void> {
     if (!options.recursive) {
       console.log(chalk.gray('※サブディレクトリは監視されません。'));
     }
-    console.log(chalk.gray('新しい画像が追加されるのを待っています... (終了するには Ctrl+C を押してください)\n'));
-
     const { default: chokidar } = await import('chokidar');
     const queue: string[] = [];
     let processing = false;
@@ -979,6 +1003,7 @@ async function main(): Promise<void> {
     const copyOnlyWatch = onlyRenameRequested(options);
 
     const generatedFiles = new Set<string>();
+    const dirtyOutputDirectories = new Set<string>();
 
     const processQueue = async () => {
       if (processing) return;
@@ -1008,6 +1033,7 @@ async function main(): Promise<void> {
         if (result.success) {
           if (result.outputPath) {
             const absOutput = path.resolve(cwd, result.outputPath);
+            dirtyOutputDirectories.add(path.dirname(absOutput));
             if (shouldTrackGeneratedFile(cwd, outputDir, result.outputPath, file)) {
               generatedFiles.add(absOutput);
             }
@@ -1021,6 +1047,9 @@ async function main(): Promise<void> {
       }
 
       processing = false;
+      const pendingDirectories = [...dirtyOutputDirectories];
+      dirtyOutputDirectories.clear();
+      await notifyOutputDirectories(pendingDirectories);
     };
 
     const enqueue = (file: string) => {
@@ -1085,6 +1114,20 @@ async function main(): Promise<void> {
         enqueue(relativePath);
       }
     });
+
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => {
+        watcher.off('error', onError);
+        resolve();
+      };
+      const onError = (error: unknown) => {
+        watcher.off('ready', onReady);
+        reject(error);
+      };
+      watcher.once('ready', onReady);
+      watcher.once('error', onError);
+    });
+    console.log(chalk.gray('新しい画像が追加されるのを待っています... (終了するには Ctrl+C を押してください)\n'));
 
     await new Promise<void>((_resolve) => {
       process.on('SIGINT', () => {
@@ -1184,6 +1227,8 @@ async function main(): Promise<void> {
     }
   }
 
+  const outputDirectories = new Set<string>();
+
   for (let i = 0; i < targetFiles.length; i++) {
     const { file, fileOptions } = targetFiles[i];
 
@@ -1263,6 +1308,9 @@ async function main(): Promise<void> {
       successCount++;
       totalOriginalSize += result.originalSize;
       totalOutputSize += result.outputSize || 0;
+      if (result.outputPath) {
+        outputDirectories.add(path.dirname(path.resolve(cwd, result.outputPath)));
+      }
 
       spinner.succeed(chalk.green(`${displayIndex} ${file}`));
       printFileResult(result, file);
@@ -1275,6 +1323,8 @@ async function main(): Promise<void> {
       console.log(chalk.red(`  エラー     : ${result.error}\n`));
     }
   }
+
+  await notifyOutputDirectories(outputDirectories);
 
   const netReduction = totalOriginalSize - totalOutputSize;
   const totalReductionLabel = netReduction >= 0
