@@ -28,14 +28,14 @@ function getPresetFilePath(): string {
 function readPresetFile(): Record<string, StoredOptions> {
   const filePath = getPresetFilePath();
   if (!fs.existsSync(filePath)) {
-    return {};
+    return Object.create(null);
   }
   const raw = fs.readFileSync(filePath, 'utf8');
   const parsed = TOML.parse(raw) as Record<string, Record<string, unknown>>;
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('TOMLフォーマットが不正です。オブジェクト形式である必要があります。');
   }
-  const result: Record<string, StoredOptions> = {};
+  const result: Record<string, StoredOptions> = Object.create(null);
   for (const [name, entry] of Object.entries(parsed)) {
     if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
       result[name] = normalizePresetEntry(entry);
@@ -52,20 +52,16 @@ function normalizePresetEntry(raw: Record<string, unknown>): StoredOptions {
     recursive: typeof raw.recursive === 'boolean' ? raw.recursive : undefined,
     keep: typeof raw.keep === 'boolean' ? raw.keep : undefined,
     name: typeof raw.name === 'string' ? raw.name : undefined,
-    pick: typeof raw.pick === 'boolean' ? raw.pick : undefined,
     directory: typeof raw.directory === 'string' ? raw.directory : undefined,
-    confirm: typeof raw.confirm === 'boolean' ? raw.confirm : undefined,
     hard: typeof raw.hard === 'boolean' ? raw.hard : undefined,
     trash: typeof raw.trash === 'boolean' ? raw.trash : undefined,
-    watch: typeof raw.watch === 'boolean' ? raw.watch : undefined,
-    initial: typeof raw.initial === 'boolean' ? raw.initial : undefined,
     poll: typeof raw.poll === 'boolean' ? raw.poll : undefined,
   };
 }
 
 function writePresetFile(presets: Record<string, StoredOptions>): boolean {
   try {
-    const clean: Record<string, Record<string, unknown>> = {};
+    const clean: Record<string, Record<string, unknown>> = Object.create(null);
     for (const [name, opts] of Object.entries(presets)) {
       const entry: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(opts)) {

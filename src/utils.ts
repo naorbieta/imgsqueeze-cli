@@ -89,18 +89,27 @@ export function parseSize(sizeStr: string): number {
   const value = parseFloat(match[1]);
   const unit = (match[2] || 'b').toLowerCase();
 
+  let bytes: number;
   switch (unit) {
     case 'b':
-      return Math.round(value);
+      bytes = Math.round(value);
+      break;
     case 'kb':
-      return Math.round(value * 1024);
+      bytes = Math.round(value * 1024);
+      break;
     case 'mb':
-      return Math.round(value * 1024 * 1024);
+      bytes = Math.round(value * 1024 * 1024);
+      break;
     case 'gb':
-      return Math.round(value * 1024 * 1024 * 1024);
+      bytes = Math.round(value * 1024 * 1024 * 1024);
+      break;
     default:
-      return Math.round(value);
+      bytes = Math.round(value);
   }
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new Error(`容量は1B以上の有効な数値で指定してください: "${sizeStr}"`);
+  }
+  return bytes;
 }
 
 /**
